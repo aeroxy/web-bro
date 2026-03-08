@@ -1,0 +1,117 @@
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/600.css";
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --color-shell-950: #020202;
+  --color-shell-925: #080808;
+  --color-shell-900: #111111;
+  --color-shell-850: #171717;
+  --color-shell-800: #232323;
+  --color-shell-700: #343434;
+  --color-shell-600: #5c5c5c;
+  --color-shell-500: #848484;
+  --color-accent-500: #f2f2f2;
+  --color-accent-400: #ffffff;
+  --color-accent-300: #e4e4e4;
+  --color-danger-400: #f1a7a7;
+  --color-emerald-400: #cfcfcf;
+  --color-amber-400: #d9d1c0;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-shell-950 text-slate-100 antialiased;
+    background-image:
+      radial-gradient(
+        circle at top left,
+        rgba(255, 255, 255, 0.08),
+        transparent 28%
+      ),
+      radial-gradient(
+        circle at top right,
+        rgba(255, 255, 255, 0.04),
+        transparent 24%
+      ),
+      linear-gradient(180deg, #020202 0%, #090909 100%);
+  }
+
+  button,
+  input,
+  textarea {
+    @apply outline-none;
+  }
+
+  * {
+    scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
+  }
+}
+
+@layer components {
+  .app-shell {
+    @apply h-full p-4 md:p-6;
+  }
+
+  .panel-surface {
+    @apply rounded-[28px] border border-white/8 bg-shell-925/80 shadow-[0_30px_100px_rgba(0,0,0,0.45)] backdrop-blur-xl;
+  }
+
+  .panel-header {
+    @apply flex items-center justify-between gap-3 border-b border-white/6 px-5 py-4;
+  }
+
+  .panel-title {
+    @apply text-sm font-semibold uppercase tracking-[0.24em] text-slate-300;
+  }
+
+  .panel-body {
+    @apply min-h-0 px-5 py-4;
+  }
+
+  .subtle-scrollbar {
+    @apply min-h-0 overflow-auto;
+  }
+
+  .ghost-button {
+    @apply inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-200 transition hover:border-white/20 hover:bg-white/8;
+  }
+
+  .ghost-button-danger {
+    @apply inline-flex items-center justify-center rounded-2xl border border-danger-400/25 bg-danger-400/10 px-3 py-2 text-sm text-danger-400 transition hover:bg-danger-400/15;
+  }
+
+  .primary-button {
+    @apply inline-flex items-center justify-center rounded-2xl bg-accent-500 px-3 py-2 text-sm font-medium text-shell-950 transition hover:bg-accent-400 disabled:cursor-not-allowed disabled:bg-shell-700 disabled:text-slate-300;
+  }
+
+  .pill {
+    @apply inline-flex items-center rounded-full border border-white/10 bg-white/6 px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.14em] text-slate-300;
+  }
+
+  .input-shell {
+    @apply w-full rounded-2xl border border-white/8 bg-shell-900/90 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-500;
+  }
+
+  .surface-muted {
+    @apply rounded-3xl border border-white/8 bg-white/4;
+  }
+
+  .resize-handle {
+    @apply relative mx-2 hidden w-[1px] bg-white/8 md:block;
+  }
+
+  .resize-handle::after {
+    @apply absolute inset-y-8 -left-1 -right-1 rounded-full bg-accent-500/20 content-[''];
+  }
+}
