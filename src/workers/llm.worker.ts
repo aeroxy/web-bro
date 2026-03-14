@@ -11,6 +11,8 @@ import type {
   AgentDecision,
   AgentFinalResponse,
   GenerateTurnRequest,
+  ModelCacheSource,
+  ModelCacheStatus,
   ModelStatus,
   ModelWorkerAPI,
   StreamChunk,
@@ -22,6 +24,18 @@ const MODEL_ID = "onnx-community/Qwen3.5-0.8B-ONNX";
 const DEBUG_PREFIX = "[Web Bro][LLM]";
 const interruptCriteria = new InterruptableStoppingCriteria();
 const TOKENIZER_PROGRESS_SHARE = 0.12;
+const FOLDER_PREFIX = "huggingface.co";
+const MODEL_FILES = [
+  "config.json",
+  "generation_config.json",
+  "tokenizer.json",
+  "tokenizer_config.json",
+  "chat_template.json",
+  "special_tokens_map.json",
+  "onnx/decoder_model_merged_q4.onnx",
+  "onnx/embed_tokens_q4.onnx",
+  "onnx/vision_encoder_q4.onnx",
+] as const;
 
 let tokenizerPromise: Promise<
   Awaited<ReturnType<typeof AutoTokenizer.from_pretrained>>
@@ -34,6 +48,11 @@ let status: ModelStatus = {
   detail: "Model idle.",
 };
 let lastLoadingLogBucket = -1;
+let activeCacheSource: ModelCacheSource | null = null;
+let modelCacheFolder: FileSystemDirectoryHandle | null = null;
+let modelCachePermission: PermissionState | "unknown" = "unknown";
+let modelCacheDownloadBytes = 0;
+let browserCachePromise: Promise<Cache | null> | null = null;
 
 function setStatus(next: ModelStatus): void {
   status = next;
@@ -56,6 +75,11 @@ function resetLoadingDebugState(): void {
   lastLoadingLogBucket = -1;
 }
 
+function resetLoadedModel(): void {
+  tokenizerPromise = null;
+  modelPromise = null;
+}
+
 type LoadingProgressEvent = {
   file?: string;
   progress?: number;
@@ -64,6 +88,10 @@ type LoadingProgressEvent = {
 
 function clampProgress(progress: number): number {
   return Math.max(0, Math.min(100, progress));
+}
+
+function setActiveCacheSource(source: ModelCacheSource): void {
+  activeCacheSource = source;
 }
 
 function scaleProgress(
@@ -123,6 +151,218 @@ function updateLoadingStatus(
   }
 }
 
+function normalizeKey(request: string): string {
+  return request.replace(/^https?:\/\//, "");
+}
+
+function toFolderPath(request: string): string {
+  const url = new URL(request);
+  return `${FOLDER_PREFIX}${url.pathname}`;
+}
+
+async function getBrowserCache(): Promise<Cache | null> {
+  if (typeof caches === "undefined") {
+    return null;
+  }
+
+  if (!browserCachePromise) {
+    browserCachePromise = caches.open(env.cacheKey).catch(() => null);
+  }
+
+  return browserCachePromise;
+}
+
+async function queryFolderPermission(
+  handle: FileSystemDirectoryHandle | null,
+): Promise<PermissionState | "unknown"> {
+  if (!handle) {
+    return "unknown";
+  }
+
+  try {
+    return await handle.queryPermission({
+      mode: "readwrite",
+      name: "file-system",
+    });
+  } catch {
+    return "unknown";
+  }
+}
+
+async function getDirectoryHandleAtPath(
+  root: FileSystemDirectoryHandle,
+  path: string,
+  create: boolean,
+): Promise<FileSystemDirectoryHandle> {
+  const segments = path.split("/").filter(Boolean);
+  let current = root;
+
+  for (const segment of segments) {
+    current = await current.getDirectoryHandle(segment, {
+      create,
+    });
+  }
+
+  return current;
+}
+
+async function readFolderFile(relativePath: string): Promise<File | null> {
+  if (!modelCacheFolder || modelCachePermission !== "granted") {
+    return null;
+  }
+
+  const segments = relativePath.split("/").filter(Boolean);
+  const fileName = segments.pop();
+
+  if (!fileName) {
+    return null;
+  }
+
+  try {
+    const directory = await getDirectoryHandleAtPath(
+      modelCacheFolder,
+      segments.join("/"),
+      false,
+    );
+    const fileHandle = await directory.getFileHandle(fileName);
+    return await fileHandle.getFile();
+  } catch {
+    return null;
+  }
+}
+
+async function writeFolderFile(
+  relativePath: string,
+  response: Response,
+): Promise<Response> {
+  if (!modelCacheFolder || modelCachePermission !== "granted") {
+    return response;
+  }
+
+  const payload = await response.arrayBuffer();
+  const segments = relativePath.split("/").filter(Boolean);
+  const fileName = segments.pop();
+
+  if (!fileName) {
+    return response;
+  }
+
+  const directory = await getDirectoryHandleAtPath(
+    modelCacheFolder,
+    segments.join("/"),
+    true,
+  );
+  const fileHandle = await directory.getFileHandle(fileName, {
+    create: true,
+  });
+  const writer = await fileHandle.createWritable();
+
+  try {
+    await writer.write(payload);
+    await writer.close();
+  } catch (error) {
+    await writer.abort();
+    throw error;
+  }
+
+  modelCacheDownloadBytes += payload.byteLength;
+  debugLog("cache:folder-write", {
+    bytes: payload.byteLength,
+    path: relativePath,
+  });
+
+  return new Response(payload.slice(0), {
+    headers: new Headers(response.headers),
+    status: response.status,
+    statusText: response.statusText,
+  });
+}
+
+async function isManifestComplete(): Promise<boolean> {
+  if (!modelCacheFolder || modelCachePermission !== "granted") {
+    return false;
+  }
+
+  for (const file of MODEL_FILES) {
+    const relativePath = `${MODEL_ID}/resolve/main/${file}`;
+    const resolved = await readFolderFile(`${FOLDER_PREFIX}/${relativePath}`);
+
+    if (!resolved) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function buildCacheStatus(detail = "Browser cache only."): ModelCacheStatus {
+  return {
+    configured: modelCacheFolder !== null,
+    detail,
+    downloadBytes: modelCacheDownloadBytes || undefined,
+    folderName: modelCacheFolder?.name ?? null,
+    isReady:
+      activeCacheSource === "folder"
+        ? true
+        : modelCacheFolder !== null && modelCachePermission === "granted",
+    manifestComplete: false,
+    permission: modelCachePermission,
+    source: activeCacheSource,
+  };
+}
+
+const folderBackedCache = {
+  async match(request: string) {
+    const cacheKey = normalizeKey(request);
+    const folderPath = toFolderPath(request);
+    const folderFile = await readFolderFile(folderPath);
+
+    if (folderFile) {
+      setActiveCacheSource("folder");
+      debugLog("cache:folder-hit", {
+        path: folderPath,
+      });
+      return new Response(await folderFile.arrayBuffer(), {
+        headers: new Headers({
+          "content-length": String(folderFile.size),
+          "content-type": folderFile.type || "application/octet-stream",
+        }),
+        status: 200,
+      });
+    }
+
+    const browserCache = await getBrowserCache();
+    const browserResponse = browserCache
+      ? await browserCache.match(cacheKey)
+      : undefined;
+
+    if (browserResponse) {
+      setActiveCacheSource("browser-cache");
+      debugLog("cache:browser-hit", {
+        key: cacheKey,
+      });
+      return browserResponse;
+    }
+
+    return undefined;
+  },
+  async put(request: string, response: Response) {
+    const cacheKey = normalizeKey(request);
+    let nextResponse = response;
+
+    if (modelCacheFolder && modelCachePermission === "granted") {
+      setActiveCacheSource("network");
+      nextResponse = await writeFolderFile(toFolderPath(request), response);
+    }
+
+    const browserCache = await getBrowserCache();
+
+    if (browserCache) {
+      await browserCache.put(cacheKey, nextResponse.clone());
+    }
+  },
+};
+
 function loadTokenizer() {
   if (!tokenizerPromise) {
     tokenizerPromise = AutoTokenizer.from_pretrained(MODEL_ID, {
@@ -166,7 +406,11 @@ async function loadResources() {
   });
   env.allowLocalModels = false;
   env.allowRemoteModels = true;
-  env.useBrowserCache = true;
+  env.useBrowserCache = false;
+  env.useCustomCache = true;
+  env.customCache = folderBackedCache;
+  modelCacheDownloadBytes = 0;
+  activeCacheSource = null;
 
   const tokenizer = await loadTokenizer();
   debugLog("tokenizer:ready");
@@ -181,7 +425,12 @@ async function loadResources() {
   debugLog("model:ready");
   setStatus({
     phase: "ready",
-    detail: "Model ready on WebGPU.",
+    detail:
+      activeCacheSource === "folder"
+        ? "Model ready on WebGPU from local folder cache."
+        : activeCacheSource === "browser-cache"
+          ? "Model ready on WebGPU from browser cache."
+          : "Model ready on WebGPU.",
     progress: 100,
   });
 
@@ -513,6 +762,34 @@ const llmApi: ModelWorkerAPI = {
     }
   },
 
+  async configureModelCache(directoryHandle) {
+    modelCacheFolder = directoryHandle;
+    modelCachePermission = await queryFolderPermission(directoryHandle);
+    modelCacheDownloadBytes = 0;
+    activeCacheSource = null;
+    resetLoadedModel();
+
+    const manifestComplete = await isManifestComplete();
+    const detail = !directoryHandle
+      ? "Browser cache only."
+      : modelCachePermission !== "granted"
+        ? "Model folder selected, but permission must be reconnected."
+        : manifestComplete
+          ? "Model folder cache is ready."
+          : "Model folder selected. Missing files will be downloaded on first load.";
+
+    return {
+      configured: directoryHandle !== null,
+      detail,
+      downloadBytes: undefined,
+      folderName: directoryHandle?.name ?? null,
+      isReady: manifestComplete,
+      manifestComplete,
+      permission: modelCachePermission,
+      source: activeCacheSource,
+    };
+  },
+
   async generateTurn(request, onStream) {
     const output = await generateText(request, onStream);
 
@@ -529,6 +806,27 @@ const llmApi: ModelWorkerAPI = {
   async abortGeneration() {
     debugLog("abortGeneration");
     interruptCriteria.interrupt();
+  },
+
+  async clearModelCachePreference() {
+    return await llmApi.configureModelCache(null);
+  },
+
+  async getModelCacheStatus() {
+    const manifestComplete = await isManifestComplete();
+    const detail = !modelCacheFolder
+      ? "Browser cache only."
+      : modelCachePermission !== "granted"
+        ? "Model folder selected, but permission must be reconnected."
+        : manifestComplete
+          ? "Model folder cache is ready."
+          : "Model folder is selected but still needs model files.";
+
+    return {
+      ...buildCacheStatus(detail),
+      manifestComplete,
+      isReady: manifestComplete,
+    };
   },
 
   async getStatus() {

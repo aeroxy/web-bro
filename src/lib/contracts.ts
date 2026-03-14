@@ -129,13 +129,31 @@ export interface ModelStatus {
   progress?: number;
 }
 
+export type ModelCacheSource = "folder" | "browser-cache" | "network";
+
+export interface ModelCacheStatus {
+  configured: boolean;
+  detail: string;
+  downloadBytes?: number;
+  folderName: string | null;
+  isReady: boolean;
+  manifestComplete: boolean;
+  permission: PermissionState | "unknown";
+  source: ModelCacheSource | null;
+}
+
 export interface ModelWorkerAPI {
   loadModel(): Promise<ModelStatus>;
+  configureModelCache(
+    directoryHandle: FileSystemDirectoryHandle | null,
+  ): Promise<ModelCacheStatus>;
   generateTurn(
     request: GenerateTurnRequest,
     onStream?: StreamListener,
   ): Promise<AgentFinalResponse | AgentDecision>;
   abortGeneration(): Promise<void>;
+  clearModelCachePreference(): Promise<ModelCacheStatus>;
+  getModelCacheStatus(): Promise<ModelCacheStatus>;
   getStatus(): Promise<ModelStatus>;
 }
 

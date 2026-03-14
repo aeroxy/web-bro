@@ -4,6 +4,7 @@ import { createAppStore } from "../app/store";
 import type {
   AgentDecision,
   GenerateTurnRequest,
+  ModelCacheStatus,
   ModelStatus,
   WorkspaceFileSnapshot,
   WorkspaceSearchHit,
@@ -51,6 +52,15 @@ function createMockRuntime(initialFiles: Record<string, string>) {
     },
   ];
   let decisionIndex = 0;
+  let modelCacheStatus: ModelCacheStatus = {
+    configured: false,
+    detail: "Browser cache only.",
+    folderName: null,
+    isReady: false,
+    manifestComplete: false,
+    permission: "unknown",
+    source: null,
+  };
 
   const buildTree = (): WorkspaceTreeNode[] => [
     {
@@ -92,6 +102,43 @@ function createMockRuntime(initialFiles: Record<string, string>) {
     dispose() {},
     llm: {
       abortGeneration: vi.fn(async () => {}),
+      clearModelCachePreference: vi.fn(async () => {
+        modelCacheStatus = {
+          configured: false,
+          detail: "Browser cache only.",
+          folderName: null,
+          isReady: false,
+          manifestComplete: false,
+          permission: "unknown",
+          source: null,
+        };
+        return modelCacheStatus;
+      }),
+      configureModelCache: vi.fn(
+        async (handle: FileSystemDirectoryHandle | null) => {
+          modelCacheStatus = handle
+            ? {
+                configured: true,
+                detail:
+                  "Model folder selected. Missing files will be downloaded on first load.",
+                folderName: handle.name,
+                isReady: false,
+                manifestComplete: false,
+                permission: "granted",
+                source: null,
+              }
+            : {
+                configured: false,
+                detail: "Browser cache only.",
+                folderName: null,
+                isReady: false,
+                manifestComplete: false,
+                permission: "unknown",
+                source: null,
+              };
+          return modelCacheStatus;
+        },
+      ),
       generateTurn: vi.fn(
         async (
           request: GenerateTurnRequest,
@@ -123,6 +170,7 @@ function createMockRuntime(initialFiles: Record<string, string>) {
           phase: "ready",
         }),
       ),
+      getModelCacheStatus: vi.fn(async () => modelCacheStatus),
       loadModel: vi.fn(
         async (): Promise<ModelStatus> => ({
           detail: "Model ready on WebGPU.",
@@ -562,5 +610,52 @@ describe("app store", () => {
     expect(
       persistedThreads.some((thread) => thread.id === deletedThreadId),
     ).toBe(false);
+  });
+
+  it("persists and clears the model cache folder preference", async () => {
+    const database = new AppDatabase(`web-bro-test-${crypto.randomUUID()}`);
+    const { runtime } = createMockRuntime({
+      "src/app.ts": "export const app = 'initial';\n",
+    });
+    const modelHandle = createFakeHandle("models");
+    const store = createAppStore({
+      capabilityReport: {
+        hasDirectoryPicker: true,
+        hasWebGPU: true,
+        isChromium: true,
+        isSecureContext: true,
+        reasons: [],
+        supported: true,
+      },
+      database,
+      runtime,
+    });
+
+    await store.getState().initialize();
+    vi.spyOn(modelHandle, "requestPermission");
+    const putSpy = vi
+      .spyOn(database.model_cache_sessions, "put")
+      .mockResolvedValue("active");
+    const deleteSpy = vi
+      .spyOn(database.model_cache_sessions, "delete")
+      .mockResolvedValue(undefined);
+
+    const originalPicker = window.showDirectoryPicker;
+    window.showDirectoryPicker = vi.fn(async () => modelHandle);
+
+    try {
+      await store.getState().connectModelCacheFolder();
+    } finally {
+      window.showDirectoryPicker = originalPicker;
+    }
+
+    expect(store.getState().modelCache.folderName).toBe("models");
+    expect(runtime.llm.configureModelCache).toHaveBeenCalled();
+    expect(putSpy).toHaveBeenCalledTimes(1);
+
+    await store.getState().clearModelCacheFolder();
+
+    expect(store.getState().modelCache.configured).toBe(false);
+    expect(deleteSpy).toHaveBeenCalledWith("active");
   });
 });

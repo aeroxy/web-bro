@@ -26,7 +26,17 @@ export function ThreadSidebar() {
   const isBusy = useAppStore((state) => state.isBusy);
   const selectThread = useAppStore((state) => state.selectThread);
   const connectWorkspace = useAppStore((state) => state.connectWorkspace);
+  const connectModelCacheFolder = useAppStore(
+    (state) => state.connectModelCacheFolder,
+  );
+  const clearModelCacheFolder = useAppStore(
+    (state) => state.clearModelCacheFolder,
+  );
   const reconnectWorkspace = useAppStore((state) => state.reconnectWorkspace);
+  const reconnectModelCacheFolder = useAppStore(
+    (state) => state.reconnectModelCacheFolder,
+  );
+  const modelCache = useAppStore((state) => state.modelCache);
   const workspace = useAppStore((state) => state.workspace);
   const modelStatus = useAppStore((state) => state.modelStatus);
   const modelProgress =
@@ -122,9 +132,62 @@ export function ThreadSidebar() {
           ) : null}
 
           <p className="mt-4 text-xs leading-6 text-slate-500">
-            Qwen 3.5 0.8B ONNX, streamed from Hugging Face, executed in a
-            dedicated browser worker over WebGPU.
+            Qwen 3.5 0.8B ONNX on WebGPU. Cache source:{" "}
+            {modelCache.source ?? "pending"}.
           </p>
+
+          <div className="mt-4 rounded-[20px] border border-white/8 bg-black/30 px-3 py-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-300">
+                  Cache folder
+                </p>
+                <p className="mt-1 text-sm text-slate-500">
+                  {modelCache.folderName ?? "Not Selected"}
+                </p>
+              </div>
+              <span className="pill">
+                {modelCache.reconnectRequired
+                  ? "Reconnect"
+                  : modelCache.manifestComplete
+                    ? "Ready"
+                    : modelCache.configured
+                      ? "Priming"
+                      : "Optional"}
+              </span>
+            </div>
+
+            <p className="mt-3 text-xs leading-6 text-slate-500">
+              {modelCache.detail}
+            </p>
+
+            <div className="mt-3 flex gap-2">
+              <button
+                className="ghost-button flex-1"
+                onClick={() =>
+                  modelCache.reconnectRequired
+                    ? void reconnectModelCacheFolder()
+                    : void connectModelCacheFolder()
+                }
+                type="button"
+              >
+                {modelCache.reconnectRequired
+                  ? "Reconnect cache"
+                  : modelCache.configured
+                    ? "Change folder"
+                    : "Select folder"}
+              </button>
+              {modelCache.configured ? (
+                <button
+                  className="ghost-button"
+                  onClick={() => void clearModelCacheFolder()}
+                  type="button"
+                >
+                  Clear
+                </button>
+              ) : null}
+            </div>
+          </div>
         </div>
       </div>
 

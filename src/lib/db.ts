@@ -26,11 +26,21 @@ export interface AppSettingRecord {
   value: unknown;
 }
 
+export interface ModelCacheSessionRecord {
+  id: string;
+  folderName: string;
+  handle?: FileSystemDirectoryHandle;
+  manifestComplete: boolean;
+  permission: PermissionState | "unknown";
+  updatedAt: string;
+}
+
 export class AppDatabase extends Dexie {
   threads!: Table<ChatThread, string>;
   workspace_sessions!: Table<WorkspaceSessionRecord, string>;
   write_backups!: Table<WriteBackupRecord, string>;
   app_settings!: Table<AppSettingRecord, string>;
+  model_cache_sessions!: Table<ModelCacheSessionRecord, string>;
 
   constructor(name = "web-bro-db") {
     super(name);
@@ -40,6 +50,14 @@ export class AppDatabase extends Dexie {
       workspace_sessions: "id, updatedAt",
       write_backups: "id, threadId, path, createdAt",
       app_settings: "key",
+    });
+
+    this.version(2).stores({
+      threads: "id, updatedAt",
+      workspace_sessions: "id, updatedAt",
+      write_backups: "id, threadId, path, createdAt",
+      app_settings: "key",
+      model_cache_sessions: "id, updatedAt",
     });
   }
 }

@@ -11,6 +11,7 @@ import type {
   AssistantMessage,
   ChatMessage,
   ChatThread,
+  ModelCacheStatus,
   ModelConversationMessage,
   ModelStatus,
   StreamChunk,
@@ -23,7 +24,10 @@ import type {
   WorkspaceTreeNode,
 } from "../lib/contracts";
 import { type AppDatabase, db } from "../lib/db";
-import { pickWorkspaceDirectory } from "../lib/directory-picker";
+import {
+  pickModelCacheDirectory,
+  pickWorkspaceDirectory,
+} from "../lib/directory-picker";
 import {
   createId,
   formatTimestamp,
@@ -48,10 +52,18 @@ interface WorkspaceState {
   tree: WorkspaceTreeNode[];
 }
 
+interface ModelCacheState extends ModelCacheStatus {
+  handle: FileSystemDirectoryHandle | null;
+  reconnectRequired: boolean;
+}
+
 export interface AppState {
   agentActivity: string | null;
   capabilities: CapabilityReport;
   currentThreadId: string | null;
+  modelCache: ModelCacheState;
+  clearModelCacheFolder(): Promise<void>;
+  connectModelCacheFolder(): Promise<void>;
   deleteThread(threadId: string): Promise<void>;
   hydrated: boolean;
   isBusy: boolean;
@@ -65,6 +77,7 @@ export interface AppState {
   dismissDiff(): void;
   initialize(): Promise<void>;
   openFile(path: string): Promise<void>;
+  reconnectModelCacheFolder(): Promise<void>;
   reconnectWorkspace(): Promise<void>;
   refreshWorkspace(): Promise<void>;
   searchWorkspace(query: string): Promise<void>;
@@ -92,6 +105,18 @@ const initialWorkspaceState: WorkspaceState = {
   searchResults: [],
   summary: null,
   tree: [],
+};
+
+const initialModelCacheState: ModelCacheState = {
+  configured: false,
+  detail: "Browser cache only.",
+  folderName: null,
+  handle: null,
+  isReady: false,
+  manifestComplete: false,
+  permission: "unknown",
+  reconnectRequired: false,
+  source: null,
 };
 
 function sortThreads(threads: ChatThread[]): ChatThread[] {
@@ -190,6 +215,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
   const resolveCapabilities = () =>
     options.capabilityReport ?? getCapabilityReport();
   const pickWorkspace = options.pickWorkspace ?? pickWorkspaceDirectory;
+  const pickModelCache = pickModelCacheDirectory;
 
   const store = createStore<AppState>()((set, get) => {
     const createEmptyThread = (timestamp = now()): ChatThread => ({
@@ -514,6 +540,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
       currentThreadId: null,
       hydrated: false,
       isBusy: false,
+      modelCache: initialModelCacheState,
       modelStatus: {
         phase: "idle",
         detail: "Model idle.",
@@ -545,6 +572,28 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
           hydrated: true,
           threads,
         });
+
+        const modelSession = await database.model_cache_sessions.get("active");
+
+        if (modelSession) {
+          const modelPermission = modelSession.handle
+            ? await getPermissionState(modelSession.handle)
+            : "unknown";
+          const modelCacheStatus = modelSession.handle
+            ? await resolveRuntime().llm.configureModelCache(
+                modelSession.handle,
+              )
+            : await resolveRuntime().llm.clearModelCachePreference();
+
+          set({
+            modelCache: {
+              ...modelCacheStatus,
+              handle: modelSession.handle ?? null,
+              permission: modelPermission,
+              reconnectRequired: modelPermission !== "granted",
+            },
+          });
+        }
 
         const session = await database.workspace_sessions.get("active");
 
@@ -587,6 +636,86 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
       async createThread() {
         const thread = createEmptyThread();
         await commitThread(thread, true);
+      },
+
+      async connectModelCacheFolder() {
+        const handle = await pickModelCache();
+        const permission = await handle.requestPermission(
+          FILE_PERMISSION_DESCRIPTOR,
+        );
+
+        if (permission !== "granted") {
+          throw new Error("Model cache folder access was not granted.");
+        }
+
+        const status = await resolveRuntime().llm.configureModelCache(handle);
+
+        await database.model_cache_sessions.put({
+          folderName: handle.name,
+          handle,
+          id: "active",
+          manifestComplete: status.manifestComplete,
+          permission,
+          updatedAt: now(),
+        });
+
+        set({
+          modelCache: {
+            ...status,
+            handle,
+            permission,
+            reconnectRequired: false,
+          },
+        });
+      },
+
+      async reconnectModelCacheFolder() {
+        const handle = get().modelCache.handle;
+
+        if (!handle) {
+          throw new Error("No model cache folder is stored.");
+        }
+
+        const permission = await handle.requestPermission(
+          FILE_PERMISSION_DESCRIPTOR,
+        );
+
+        if (permission !== "granted") {
+          throw new Error("Model cache folder access is still not granted.");
+        }
+
+        const status = await resolveRuntime().llm.configureModelCache(handle);
+
+        await database.model_cache_sessions.put({
+          folderName: handle.name,
+          handle,
+          id: "active",
+          manifestComplete: status.manifestComplete,
+          permission,
+          updatedAt: now(),
+        });
+
+        set({
+          modelCache: {
+            ...status,
+            handle,
+            permission,
+            reconnectRequired: false,
+          },
+        });
+      },
+
+      async clearModelCacheFolder() {
+        const status = await resolveRuntime().llm.clearModelCachePreference();
+        await database.model_cache_sessions.delete("active");
+
+        set({
+          modelCache: {
+            ...status,
+            handle: null,
+            reconnectRequired: false,
+          },
+        });
       },
 
       async deleteThread(threadId) {
@@ -833,7 +962,15 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
 
           const runtime = resolveRuntime();
           const modelStatus = await loadModelWithProgress(runtime);
-          set({ modelStatus });
+          set({
+            modelCache: {
+              ...get().modelCache,
+              ...(await runtime.llm.getModelCacheStatus()),
+              handle: get().modelCache.handle,
+              reconnectRequired: get().modelCache.permission !== "granted",
+            },
+            modelStatus,
+          });
 
           const toolResults: ToolResultContext[] = [];
           const agentNotes: string[] = [];
@@ -1027,6 +1164,12 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
           }));
 
           set({
+            modelCache: {
+              ...get().modelCache,
+              ...(await runtime.llm.getModelCacheStatus()),
+              handle: get().modelCache.handle,
+              reconnectRequired: get().modelCache.permission !== "granted",
+            },
             modelStatus: await runtime.llm.getStatus(),
           });
         } catch (error) {
