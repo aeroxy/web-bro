@@ -766,7 +766,6 @@ const llmApi: ModelWorkerAPI = {
     modelCacheFolder = directoryHandle;
     modelCachePermission = await queryFolderPermission(directoryHandle);
     modelCacheDownloadBytes = 0;
-    activeCacheSource = null;
     resetLoadedModel();
 
     const manifestComplete = await isManifestComplete();
@@ -777,6 +776,8 @@ const llmApi: ModelWorkerAPI = {
         : manifestComplete
           ? "Model folder cache is ready."
           : "Model folder selected. Missing files will be downloaded on first load.";
+
+    activeCacheSource = directoryHandle && manifestComplete ? "folder" : null;
 
     return {
       configured: directoryHandle !== null,
@@ -822,8 +823,12 @@ const llmApi: ModelWorkerAPI = {
           ? "Model folder cache is ready."
           : "Model folder is selected but still needs model files.";
 
+    const source =
+      modelCacheFolder && manifestComplete ? "folder" : activeCacheSource;
+
     return {
       ...buildCacheStatus(detail),
+      source,
       manifestComplete,
       isReady: manifestComplete,
     };
