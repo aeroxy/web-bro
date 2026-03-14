@@ -62,7 +62,12 @@ function createWorkspaceError(code: string, message: string): Error {
 }
 
 function normalizePath(path = ""): string {
-  return path.replaceAll("\\", "/").split("/").filter(Boolean).join("/");
+  const normalized = path
+    .replaceAll("\\", "/")
+    .split("/")
+    .filter(Boolean)
+    .join("/");
+  return normalized === "." ? "" : normalized;
 }
 
 function pathExtension(path: string): string {
