@@ -64,33 +64,61 @@ export type AgentToolCall =
       tool: "list_dir";
       args: ListDirArgs;
       reason?: string;
+      raw?: string;
     }
   | {
       type: "tool";
       tool: "read_file";
       args: ReadFileArgs;
       reason?: string;
+      raw?: string;
     }
   | {
       type: "tool";
       tool: "search_text";
       args: SearchTextArgs;
       reason?: string;
+      raw?: string;
     }
   | {
       type: "tool";
       tool: "write_file";
       args: WriteFileArgs;
       reason?: string;
+      raw?: string;
     };
 
 export interface AgentFinalResponse {
   type: "final";
   message: string;
   reason?: string;
+  raw?: string;
 }
 
-export type AgentDecision = AgentToolCall | AgentFinalResponse;
+export interface AgentIncompleteResponse {
+  type: "incomplete";
+  partial: string;
+  raw: string;
+}
+
+export interface AgentErrorResponse {
+  type: "error";
+  message: string;
+  raw: string;
+}
+
+export interface AgentContinueResponse {
+  type: "continue";
+  content: string;
+  raw: string;
+}
+
+export type AgentDecision =
+  | AgentToolCall
+  | AgentFinalResponse
+  | AgentIncompleteResponse
+  | AgentErrorResponse
+  | AgentContinueResponse;
 
 export interface ModelConversationMessage {
   role: "user" | "assistant" | "system";
@@ -107,12 +135,10 @@ export interface ToolResultContext {
 }
 
 export interface GenerateTurnRequest {
-  mode: "decide" | "answer";
-  userInput: string;
   conversation: ModelConversationMessage[];
   workspaceSummary: string | null;
-  toolResults: ToolResultContext[];
   agentNotes?: string[];
+  partialOutput?: string;
 }
 
 export interface StreamChunk {

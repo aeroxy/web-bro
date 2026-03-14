@@ -9,7 +9,6 @@ import { expose } from "comlink";
 
 import type {
   AgentDecision,
-  AgentFinalResponse,
   GenerateTurnRequest,
   ModelCacheSource,
   ModelCacheStatus,
@@ -18,7 +17,7 @@ import type {
   StreamChunk,
   StreamListener,
 } from "../lib/contracts";
-import { extractFirstJsonObject, promptRequestsFileWrite } from "../lib/text";
+import { extractFirstJsonObject } from "../lib/text";
 
 const MODEL_ID = "onnx-community/Qwen3.5-0.8B-ONNX";
 const DEBUG_PREFIX = "[Web Bro][LLM]";
@@ -444,96 +443,112 @@ async function loadResources() {
   return { tokenizer, model };
 }
 
-function renderConversation(request: GenerateTurnRequest): string {
+export function renderConversation(request: GenerateTurnRequest): string {
+  // Extract the original task from the first user message
+  const firstUserMessage = request.conversation.find(
+    (m) => m.role === "user" && !m.content.includes("[Tool:"),
+  );
+  const originalTask = firstUserMessage?.content.trim() ?? "No task specified";
+
+  // Separate user/assistant messages from tool results
+  const conversation = request.conversation.filter(
+    (m) => !m.content.includes("[Tool:"),
+  );
+  const toolResults = request.conversation.filter((m) =>
+    m.content.includes("[Tool:"),
+  );
+
   const history =
-    request.conversation.length > 0
-      ? request.conversation
-          .map(
-            (message) =>
-              `${message.role.toUpperCase()}: ${message.content.trim()}`,
-          )
+    conversation.length > 0
+      ? conversation
+          .map((m) => `${m.role.toUpperCase()}: ${m.content.trim()}`)
           .join("\n\n")
       : "No prior conversation.";
 
-  const tools =
-    request.toolResults.length > 0
-      ? request.toolResults
-          .map((result) =>
-            [
-              `Tool: ${result.tool}`,
-              `Success: ${result.ok ? "yes" : "no"}`,
-              `Summary: ${result.summary}`,
-              result.detail ? `Detail:\n${result.detail}` : "",
-            ]
-              .filter(Boolean)
-              .join("\n"),
-          )
-          .join("\n\n---\n\n")
-      : "No tool results yet.";
+  const toolSummary =
+    toolResults.length > 0
+      ? toolResults.map((m) => m.content.trim()).join("\n\n")
+      : null;
+
   const agentNotes =
     request.agentNotes && request.agentNotes.length > 0
       ? request.agentNotes.map((note) => `- ${note}`).join("\n")
       : "No additional guidance.";
 
+  const parts = [
+    `ORIGINAL TASK:\n${originalTask}`,
+    `WORKSPACE:\n${request.workspaceSummary ?? "No workspace connected."}`,
+    `CONVERSATION:\n${history}`,
+  ];
+
+  if (toolSummary) {
+    parts.push(`TOOL RESULTS (already completed):\n${toolSummary}`);
+  }
+
+  if (request.partialOutput) {
+    parts.push(
+      `INCOMPLETE - Continue from here, do NOT repeat:\n${request.partialOutput}`,
+    );
+  }
+
+  parts.push(`GUIDANCE:\n${agentNotes}`);
+
+  return parts.join("\n\n");
+}
+
+export const SYSTEM_PROMPT = [
+  "You are Web Bro, a workspace agent running fully inside a Chromium browser.",
+  "",
+  "CRITICAL: YOU HAVE TOOLS. YOU CAN WRITE FILES. USE THEM.",
+  "",
+  "YOUR RESPONSE MUST USE EXACTLY ONE TAG:",
+  "1. [TEXT]...[END]  - Talking only, no action taken",
+  "2. [TOOL]{...}[END] - Actually does something",
+  "",
+  "NEVER use both [TEXT] and [TOOL] in one response.",
+  "NEVER explain what you will do in [TEXT] - just do it with [TOOL].",
+  "",
+  "IF THE USER WANTS A FILE CREATED:",
+  "- Use ONLY [TOOL] with write_file. Do NOT use [TEXT] first.",
+  "- Writing in [TEXT] does NOT create a file.",
+  "",
+  "YOUR TOOLS:",
+  '[TOOL] {"tool":"write_file","args":{"path":"file.txt","content":"text"},"reason":"write"} [END]',
+  '[TOOL] {"tool":"list_dir","args":{"path":"."},"reason":"list"} [END]',
+].join("\n");
+
+export const buildContinuePrompt = (isToolCall: boolean): string => {
+  if (isToolCall) {
+    return [
+      "Your previous tool call JSON was cut off.",
+      "Continue the JSON from where it stopped using: [CONTINUE]more[END]",
+      "Do NOT repeat what was already output.",
+      "You MUST end with [END]. No [END] = rejected.",
+    ].join("\n");
+  }
   return [
-    `Current user request:\n${request.userInput}`,
-    `Workspace summary:\n${request.workspaceSummary ?? "No workspace connected."}`,
-    `Recent conversation:\n${history}`,
-    `Tool results from this turn:\n${tools}`,
-    `Agent guidance:\n${agentNotes}`,
-  ].join("\n\n");
+    "Your previous response was cut off.",
+    "Continue from where you stopped using: [CONTINUE]more[END]",
+    "Do NOT repeat what was already output.",
+    "You MUST end with [END]. No [END] = rejected.",
+  ].join("\n");
+};
+
+export function getSystemPrompt(request: GenerateTurnRequest): string {
+  if (request.partialOutput) {
+    const isToolCall =
+      request.partialOutput.includes('"tool"') ||
+      request.partialOutput.includes('"args"');
+    return buildContinuePrompt(isToolCall);
+  }
+  return SYSTEM_PROMPT;
 }
 
 function buildMessages(request: GenerateTurnRequest) {
-  const requiresWrite = promptRequestsFileWrite(request.userInput);
-  const writeAttempted = request.toolResults.some(
-    (result) => result.tool === "write_file",
-  );
-
-  if (request.mode === "decide") {
-    return [
-      {
-        role: "system" as const,
-        content: [
-          "You are Web Bro, a coding assistant running fully inside a Chromium browser with no backend.",
-          "You may only use these tools:",
-          "- list_dir { path?: string } to inspect directory contents.",
-          "- search_text { query: string } to find relevant text across the workspace.",
-          "- read_file { path: string } to inspect a text file.",
-          "- write_file { path: string, content: string } to create a text file or overwrite a file that was read earlier in this turn.",
-          "Rules:",
-          "- Existing files must be read with read_file earlier in this turn before write_file.",
-          "- Prefer search_text when the right file is not obvious.",
-          "- Use list_dir only when structure is missing.",
-          "- When you have enough information, stop calling tools.",
-          ...(requiresWrite && !writeAttempted
-            ? [
-                "- The user explicitly asked for a file creation or edit.",
-                "- You must call write_file before returning a final response unless the task is impossible.",
-                "- Never draft file contents in a final response when the user asked you to write them into the workspace.",
-              ]
-            : []),
-          '- Reply with exactly one compact JSON object and no markdown. Valid shapes are {"type":"tool","tool":"search_text","args":{"query":"..."},"reason":"..."} or {"type":"final","message":"..."}.',
-        ].join("\n"),
-      },
-      {
-        role: "user" as const,
-        content: renderConversation(request),
-      },
-    ];
-  }
-
   return [
     {
       role: "system" as const,
-      content: [
-        "You are Web Bro, a concise local coding assistant.",
-        "Respond to the user in plain language.",
-        "Summarize what you changed or discovered.",
-        "Mention written file paths when relevant.",
-        "If you wrote a file, confirm the path and summarize the change instead of pasting the whole file unless the user asked to see it.",
-        "Do not mention JSON, hidden tools, or internal protocol details.",
-      ].join("\n"),
+      content: getSystemPrompt(request),
     },
     {
       role: "user" as const,
@@ -546,55 +561,107 @@ function normalizeDecision(raw: string): AgentDecision {
   debugLog("decide:raw-output", {
     preview: previewText(raw),
   });
-  const candidate = extractFirstJsonObject(raw);
 
-  if (!candidate) {
-    debugLog("decide:parse-miss");
+  const trimmed = raw.trim();
+  const hasEndTag = trimmed.endsWith("[END]");
+  const content = hasEndTag ? trimmed.slice(0, -5).trimEnd() : trimmed;
+
+  // Must start with a valid tag
+  const validTags = ["[TEXT]", "[TOOL]", "[CONTINUE]"];
+  const matchedTag = validTags.find((tag) => content.startsWith(tag));
+
+  if (!matchedTag) {
+    debugLog("decide:invalid-format", { preview: previewText(content) });
     return {
-      type: "final",
-      message:
-        "I could not produce a reliable tool plan from the local model output.",
+      type: "error",
+      message: "Response must start with [TEXT], [TOOL], or [CONTINUE].",
+      raw,
     };
   }
 
-  try {
-    const parsed = JSON.parse(candidate) as AgentDecision;
+  const afterTag = content.slice(matchedTag.length).trim();
 
-    if (parsed.type === "tool" || parsed.type === "final") {
-      debugLog("decide:parsed", {
-        ...(parsed.type === "tool"
-          ? parsed.tool === "write_file"
-            ? {
-                args: {
-                  contentLength: parsed.args.content.length,
-                  path: parsed.args.path,
-                },
-                reason: parsed.reason,
-                tool: parsed.tool,
-                type: parsed.type,
-              }
-            : parsed
-          : {
-              message: previewText(parsed.message),
-              type: parsed.type,
-            }),
-      });
-      return parsed;
+  // Handle [CONTINUE] tag
+  if (matchedTag === "[CONTINUE]") {
+    if (!hasEndTag) {
+      debugLog("decide:continue-incomplete");
+      return {
+        type: "incomplete",
+        partial: afterTag,
+        raw,
+      };
     }
-  } catch {
-    debugLog("decide:parse-error", {
-      candidate: previewText(candidate),
-    });
     return {
-      type: "final",
-      message:
-        "I could not parse the local model output into a valid agent action.",
+      type: "continue",
+      content: afterTag,
+      raw,
     };
   }
 
+  // Handle [TOOL] tag
+  if (matchedTag === "[TOOL]") {
+    const candidate = extractFirstJsonObject(afterTag);
+
+    if (!candidate) {
+      if (!hasEndTag) {
+        debugLog("decide:tool-incomplete");
+        return {
+          type: "incomplete",
+          partial: afterTag,
+          raw,
+        };
+      }
+      return {
+        type: "error",
+        message: "Tool call requested but no valid JSON found.",
+        raw,
+      };
+    }
+
+    try {
+      const parsed = JSON.parse(candidate);
+
+      if (parsed.tool && parsed.args) {
+        debugLog("decide:tool-parsed", {
+          tool: parsed.tool,
+          reason: parsed.reason,
+        });
+        return {
+          type: "tool",
+          tool: parsed.tool,
+          args: parsed.args,
+          reason: parsed.reason,
+          raw,
+        };
+      }
+    } catch {
+      debugLog("decide:tool-parse-error");
+    }
+
+    return {
+      type: "error",
+      message: "Tool call JSON could not be parsed.",
+      raw,
+    };
+  }
+
+  // Handle [TEXT] tag
+  if (!hasEndTag) {
+    debugLog("decide:text-incomplete");
+    return {
+      type: "incomplete",
+      partial: afterTag,
+      raw,
+    };
+  }
+
+  debugLog("decide:text-parsed", {
+    message: previewText(afterTag),
+  });
   return {
     type: "final",
-    message: "I could not determine the next step safely.",
+    message: afterTag || "Done.",
+    raw,
   };
 }
 
@@ -605,9 +672,6 @@ async function generateText(
   debugLog("generate:start", {
     agentNotes: request.agentNotes?.length ?? 0,
     conversationMessages: request.conversation.length,
-    mode: request.mode,
-    toolResults: request.toolResults.length,
-    userInput: previewText(request.userInput, 120),
   });
   const { tokenizer, model } = await loadResources();
   const messages = buildMessages(request);
@@ -620,7 +684,6 @@ async function generateText(
   });
   const promptTokens = inputs.input_ids.dims.at(-1) ?? 0;
   debugLog("generate:prepared", {
-    mode: request.mode,
     promptChars: String(prompt).length,
     promptTokens,
   });
@@ -628,10 +691,7 @@ async function generateText(
   interruptCriteria.reset();
   setStatus({
     phase: "generating",
-    detail:
-      request.mode === "decide"
-        ? "Planning the next tool step."
-        : "Streaming the final response.",
+    detail: "Thinking...",
     progress: 100,
   });
 
@@ -655,7 +715,7 @@ async function generateText(
     const output = await model.generate({
       ...inputs,
       do_sample: false,
-      max_new_tokens: request.mode === "decide" ? 256 : 420,
+      max_new_tokens: 384,
       repetition_penalty: 1.05,
       stopping_criteria: [interruptCriteria],
       streamer,
@@ -669,7 +729,6 @@ async function generateText(
     if (streamed.trim()) {
       debugLog("generate:stream-complete", {
         characters: streamed.trim().length,
-        mode: request.mode,
       });
       setStatus({
         phase: "ready",
@@ -701,15 +760,12 @@ async function generateText(
 
     debugLog("generate:complete", {
       characters: decoded.trim().length,
-      mode: request.mode,
     });
 
     return decoded.trim();
   } catch (error) {
     if (error instanceof Error && error.message === "Generation interrupted.") {
-      debugLog("generate:interrupted", {
-        mode: request.mode,
-      });
+      debugLog("generate:interrupted");
       setStatus({
         phase: "ready",
         detail: "Generation cancelled.",
@@ -726,7 +782,6 @@ async function generateText(
     });
     debugLog("generate:error", {
       error: error instanceof Error ? error.message : String(error),
-      mode: request.mode,
     });
     throw error;
   }
@@ -800,15 +855,7 @@ const llmApi: ModelWorkerAPI = {
 
   async generateTurn(request, onStream) {
     const output = await generateText(request, onStream);
-
-    if (request.mode === "decide") {
-      return normalizeDecision(output);
-    }
-
-    return {
-      type: "final",
-      message: output,
-    } satisfies AgentFinalResponse;
+    return normalizeDecision(output);
   },
 
   async abortGeneration() {

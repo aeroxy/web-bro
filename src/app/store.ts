@@ -7,10 +7,14 @@ import {
   getCapabilityReport,
 } from "../lib/capabilities";
 import type {
+  AgentDecision,
+  AgentFinalResponse,
   AgentToolCall,
+  AgentToolName,
   AssistantMessage,
   ChatMessage,
   ChatThread,
+  GenerateTurnRequest,
   ModelCacheStatus,
   ModelConversationMessage,
   ModelStatus,
@@ -31,13 +35,33 @@ import {
 import {
   createId,
   formatTimestamp,
-  promptRequestsFileWrite,
   serializeSearchHits,
   serializeTree,
   summarizeThreadTitle,
   truncate,
 } from "../lib/text";
 import { getRuntime, type RuntimeServices } from "../services/runtime";
+import {
+  getSystemPrompt,
+  renderConversation,
+  SYSTEM_PROMPT,
+} from "../workers/llm.worker";
+
+export interface LogEntry {
+  id: string;
+  timestamp: string;
+  request?: GenerateTurnRequest;
+  systemPrompt?: string;
+  payload?: string; // Full prompt sent to the model
+  raw?: string;
+  parsed?: AgentDecision;
+  streamingChunks?: string[];
+  streamingComplete?: boolean;
+  error?: string | null;
+  toolName?: AgentToolName;
+  toolArgs?: any;
+  toolResult?: ToolResultContext;
+}
 
 interface WorkspaceState {
   activeFile: WorkspaceFileSnapshot | null;
@@ -70,6 +94,10 @@ export interface AppState {
   modelStatus: ModelStatus;
   threads: ChatThread[];
   workspace: WorkspaceState;
+  logs: LogEntry[];
+  addLog(entry: LogEntry): void;
+  updateLog(entry: LogEntry): void;
+  clearLogs(): void;
   cancelAgentTurn(): Promise<void>;
   clearSearch(): void;
   connectWorkspace(): Promise<void>;
@@ -131,15 +159,40 @@ function toModelConversation(
 ): ModelConversationMessage[] {
   return messages
     .filter(
-      (message): message is AssistantMessage | UserMessage =>
-        (message.role === "assistant" || message.role === "user") &&
+      (message): message is AssistantMessage | UserMessage | ToolMessage =>
+        (message.role === "assistant" ||
+          message.role === "user" ||
+          message.role === "tool") &&
         !(message.role === "assistant" && message.status === "streaming"),
     )
-    .slice(-8)
-    .map((message) => ({
-      role: message.role,
-      content: message.content,
-    }));
+    .slice(-12)
+    .map((message) => {
+      if (message.role === "tool") {
+        // Format tool messages for the LLM
+        const status =
+          message.status === "complete"
+            ? "SUCCESS"
+            : message.status === "error"
+              ? "FAILED"
+              : "RUNNING";
+        const content = [
+          `[Tool: ${message.tool}]`,
+          `Status: ${status}`,
+          `Summary: ${message.summary}`,
+          message.detail ? `Result:\n${message.detail}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n");
+        return {
+          role: "user" as const, // Present tool results as user messages for the LLM
+          content,
+        };
+      }
+      return {
+        role: message.role,
+        content: message.content,
+      };
+    });
 }
 
 function buildToolSummary(call: AgentToolCall): string {
@@ -180,10 +233,6 @@ function buildToolCallPreview(call: AgentToolCall): string {
         2,
       );
   }
-}
-
-function hasWriteAttempt(toolResults: ToolResultContext[]): boolean {
-  return toolResults.some((result) => result.tool === "write_file");
 }
 
 const FILE_PERMISSION_DESCRIPTOR: FileSystemHandlePermissionDescriptor = {
@@ -518,6 +567,21 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
               summary,
             };
           }
+          default: {
+            // This case is unreachable at runtime because the switch covers all AgentToolName values.
+            // It exists for safety if the union expands in the future.
+            const tool = (call as any).tool;
+            return {
+              context: {
+                detail: `Unknown tool: ${tool}`,
+                ok: false,
+                summary: `Unknown tool: ${tool}`,
+                tool: tool,
+              },
+              detail: `Unknown tool: ${tool}`,
+              summary: `Unknown tool: ${tool}`,
+            };
+          }
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -547,6 +611,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
       },
       threads: [],
       workspace: initialWorkspaceState,
+      logs: [],
 
       async initialize() {
         if (get().hydrated) {
@@ -907,6 +972,22 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
         }));
       },
 
+      addLog(entry) {
+        set((state) => ({
+          logs: [entry, ...state.logs].slice(0, 50),
+        }));
+      },
+
+      updateLog(entry) {
+        set((state) => ({
+          logs: state.logs.map((log) => (log.id === entry.id ? entry : log)),
+        }));
+      },
+
+      clearLogs() {
+        set({ logs: [] });
+      },
+
       async sendPrompt(prompt) {
         const trimmed = prompt.trim();
 
@@ -915,7 +996,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
         }
 
         const timestamp = now();
-        let assistantMessageId: string | null = null;
+        const assistantMessageId: string | null = null;
         let thread = await updateCurrentThread((current) => {
           const userMessage: UserMessage = {
             content: trimmed,
@@ -975,12 +1056,16 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
           const toolResults: ToolResultContext[] = [];
           const agentNotes: string[] = [];
           const knownRevisions = new Map<string, string | null>();
-          const requiresWrite = promptRequestsFileWrite(trimmed);
-          let writeReminderIssued = false;
+          let accumulatedContent = ""; // For accumulating partial outputs
+          const currentTag: "[TEXT]" | "[TOOL]" | null = null;
+          let formatRetryCount = 0;
 
           let step = 0;
+          let finalResponse: AgentFinalResponse | null = null;
+          let maxLoops = 10; // Prevent infinite loops
 
-          while (step < 4) {
+          while (step < 4 && maxLoops > 0) {
+            maxLoops--;
             thread = currentThread(get());
 
             if (!thread) {
@@ -991,31 +1076,144 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
               agentActivity:
                 toolResults.length > 0
                   ? "Reviewing tool results..."
-                  : "Planning the next step...",
+                  : currentTag
+                    ? `Continuing ${currentTag === "[TOOL]" ? "tool call" : "response"}...`
+                    : "Planning the next step...",
             });
 
-            const decision = await runtime.llm.generateTurn({
+            const logId = createId();
+            const turnRequest: GenerateTurnRequest = {
               conversation: toModelConversation(thread.messages),
-              mode: "decide",
               agentNotes,
-              toolResults,
-              userInput: trimmed,
               workspaceSummary: get().workspace.summary,
+              partialOutput: accumulatedContent || undefined,
+            };
+            // Build the full payload sent to the model
+            const systemPrompt = getSystemPrompt(turnRequest);
+            const userMessage = renderConversation(turnRequest);
+            const payload = `SYSTEM:\n${systemPrompt}\n\nUSER:\n${userMessage}`;
+
+            const logEntry: LogEntry = {
+              id: logId,
+              timestamp: now(),
+              systemPrompt,
+              payload,
+              request: turnRequest,
+              raw: "",
+              parsed: {
+                type: "final",
+                message: "",
+              },
+              streamingChunks: [],
+              streamingComplete: false,
+              error: null,
+            };
+            get().addLog(logEntry);
+
+            const onStream = proxy((chunk: StreamChunk) => {
+              if (chunk.type !== "text") return;
+              const currentLog = get().logs.find((l) => l.id === logId);
+              if (!currentLog) return;
+              get().updateLog({
+                ...currentLog,
+                streamingChunks: [
+                  ...(currentLog.streamingChunks ?? []),
+                  chunk.text,
+                ],
+              });
             });
 
-            if (decision.type !== "tool") {
-              if (
-                requiresWrite &&
-                !hasWriteAttempt(toolResults) &&
-                !writeReminderIssued
-              ) {
-                agentNotes.push(
-                  "The user explicitly asked for a file change. Continue using tools until you call write_file or determine that the task is impossible. Do not draft the file contents in a final response.",
-                );
-                writeReminderIssued = true;
-                continue;
+            let decision: AgentDecision;
+            try {
+              decision = await runtime.llm.generateTurn(
+                logEntry.request!,
+                onStream,
+              );
+            } catch (error) {
+              const errorMessage =
+                error instanceof Error ? error.message : String(error);
+              const currentLog = get().logs.find((l) => l.id === logId);
+              if (currentLog) {
+                get().updateLog({
+                  ...currentLog,
+                  error: errorMessage,
+                });
               }
+              throw error;
+            }
 
+            // Update log with raw, parsed decision, and mark streaming complete
+            const updatedLog = get().logs.find((l) => l.id === logId);
+            if (updatedLog) {
+              get().updateLog({
+                ...updatedLog,
+                raw: decision.raw ?? "",
+                parsed: decision,
+                streamingComplete: true,
+              });
+            }
+
+            // Handle incomplete responses - accumulate and continue
+            if (decision.type === "incomplete") {
+              accumulatedContent += decision.partial;
+              if (!agentNotes.some((n) => n.includes("[CONTINUE]"))) {
+                agentNotes.push(
+                  "Your previous response was cut off. Continue using [CONTINUE]content[END] format.",
+                );
+              }
+              continue;
+            }
+
+            // Handle error responses (invalid format)
+            if (decision.type === "error") {
+              formatRetryCount++;
+              if (formatRetryCount >= 2) {
+                await appendAssistantMessage(
+                  `Format error: ${decision.message}. Please use [TEXT]...[END] or [TOOL]{json}[END].`,
+                  "error",
+                );
+                return;
+              }
+              agentNotes.push(
+                `Format error: ${decision.message}. You MUST start with [TEXT] or [TOOL] and end with [END]. Try again.`,
+              );
+              continue;
+            }
+
+            // Handle continue responses (from [CONTINUE] tag)
+            if (decision.type === "continue") {
+              accumulatedContent += decision.content;
+              // Keep looping - model will eventually finish or we hit maxLoops
+              continue;
+            }
+
+            // Handle complete responses
+            if (decision.type === "final") {
+              // If we were accumulating, merge with accumulated content
+              if (accumulatedContent) {
+                finalResponse = {
+                  type: "final",
+                  message:
+                    accumulatedContent +
+                    (decision.message ? "\n" + decision.message : ""),
+                  raw: decision.raw,
+                };
+              } else {
+                finalResponse = decision;
+              }
+              break;
+            }
+
+            // Handle tool call
+            if (decision.type === "tool") {
+              // If we were accumulating text, this shouldn't happen
+              // but if we were accumulating tool JSON, merge it
+              if (currentTag === "[TOOL]" && accumulatedContent) {
+                // Try to merge accumulated partial with current tool call
+                // This is a fallback - ideally the tool call is complete now
+              }
+              // Proceed with tool execution below
+            } else {
               break;
             }
 
@@ -1049,11 +1247,32 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
               agentActivity: `Calling ${decision.tool}...`,
             });
 
+            // Log tool call
+            const toolLogId = createId();
+            const toolLogEntry: LogEntry = {
+              id: toolLogId,
+              timestamp: now(),
+              toolName: decision.tool,
+              toolArgs: decision.args,
+              toolResult: undefined,
+            };
+            get().addLog(toolLogEntry);
+
             const result = await executeToolCall(
               decision,
               knownRevisions,
               thread.id,
             );
+
+            // Update tool log with result
+            const toolLog = get().logs.find((l) => l.id === toolLogId);
+            if (toolLog) {
+              get().updateLog({
+                ...toolLog,
+                toolResult: result.context,
+              });
+            }
+
             toolResults.push(result.context);
 
             await updateCurrentThread((current) => ({
@@ -1071,105 +1290,19 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
             }));
           }
 
-          if (requiresWrite && !hasWriteAttempt(toolResults)) {
+          // We should have a final response from [TEXT] or accumulated [CONTINUE] content
+          const message =
+            finalResponse?.message.trim() || accumulatedContent.trim();
+          if (message) {
+            await appendAssistantMessage(message, "complete");
+          } else {
             await appendAssistantMessage(
-              "I did not apply the requested file change. Ask again with the target file path or the exact content you want written.",
+              "I ran out of turns without completing the request. Please try again.",
               "error",
             );
-            set({
-              modelStatus: await runtime.llm.getStatus(),
-            });
-            return;
           }
 
           set({
-            agentActivity:
-              toolResults.length > 0
-                ? "Writing the final response..."
-                : "Drafting the response...",
-          });
-
-          const pendingAssistantId = createId();
-          assistantMessageId = pendingAssistantId;
-          await updateCurrentThread((current) => ({
-            ...current,
-            messages: [
-              ...current.messages,
-              {
-                content: "",
-                createdAt: now(),
-                id: pendingAssistantId,
-                role: "assistant",
-                status: "streaming",
-              } satisfies AssistantMessage,
-            ],
-          }));
-
-          let streamed = "";
-          const response = await runtime.llm.generateTurn(
-            {
-              conversation: toModelConversation(
-                currentThread(get())?.messages ?? [],
-              ),
-              mode: "answer",
-              agentNotes,
-              toolResults,
-              userInput: trimmed,
-              workspaceSummary: get().workspace.summary,
-            },
-            proxy((chunk: StreamChunk) => {
-              if (chunk.type !== "text" || !assistantMessageId) {
-                return;
-              }
-
-              set({ agentActivity: "Streaming response..." });
-              streamed += chunk.text;
-
-              set((state) => ({
-                threads: state.threads.map((threadItem) =>
-                  threadItem.id !== state.currentThreadId
-                    ? threadItem
-                    : {
-                        ...threadItem,
-                        messages: threadItem.messages.map((message) =>
-                          message.id === assistantMessageId &&
-                          message.role === "assistant"
-                            ? {
-                                ...message,
-                                content: streamed,
-                              }
-                            : message,
-                        ),
-                      },
-                ),
-              }));
-            }),
-          );
-          const finalMessage =
-            response.type === "final"
-              ? response.message
-              : "The local model did not return a final answer.";
-
-          await updateCurrentThread((current) => ({
-            ...current,
-            messages: current.messages.map((message) =>
-              message.id === assistantMessageId && message.role === "assistant"
-                ? {
-                    ...message,
-                    content: finalMessage || streamed || "Done.",
-                    status: "complete",
-                  }
-                : message,
-            ),
-          }));
-
-          set({
-            modelCache: {
-              ...get().modelCache,
-              ...(await runtime.llm.getModelCacheStatus()),
-              handle: get().modelCache.handle,
-              reconnectRequired: get().modelCache.permission !== "granted",
-            },
             modelStatus: await runtime.llm.getStatus(),
           });
         } catch (error) {

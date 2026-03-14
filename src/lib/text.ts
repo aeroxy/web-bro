@@ -24,7 +24,10 @@ export function summarizeThreadTitle(value: string): string {
   return truncate(singleLine || "New thread", 44);
 }
 
-export function truncate(value: string, maxLength: number): string {
+export function truncate(value: string | undefined, maxLength: number): string {
+  if (value === undefined) {
+    return "";
+  }
   if (value.length <= maxLength) {
     return value;
   }
@@ -136,26 +139,4 @@ export function extractFirstJsonObject(input: string): string | null {
   }
 
   return null;
-}
-
-export function promptRequestsFileWrite(value: string): boolean {
-  const normalized = value.toLowerCase();
-  const hasWriteVerb =
-    /\b(write|create|add|make|update|edit|modify|change|overwrite|save)\b/.test(
-      normalized,
-    );
-
-  if (!hasWriteVerb) {
-    return false;
-  }
-
-  return (
-    /\bfile\b/.test(normalized) ||
-    /\b(markdown|readme|md|txt|json|toml|yaml|yml|html|css|js|jsx|ts|tsx)\b/.test(
-      normalized,
-    ) ||
-    /(?:^|[\s`'"])(?:\.{0,2}\/)?[\w./-]+\.[a-z0-9]+(?=$|[\s`'",.:;!?])/i.test(
-      value,
-    )
-  );
 }

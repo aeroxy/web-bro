@@ -141,27 +141,15 @@ function createMockRuntime(initialFiles: Record<string, string>) {
       ),
       generateTurn: vi.fn(
         async (
-          request: GenerateTurnRequest,
-          onStream?: (chunk: { type: "text"; text: string }) => void,
+          _request: GenerateTurnRequest,
+          _onStream?: (chunk: { type: "text"; text: string }) => void,
         ): Promise<AgentDecision> => {
-          if (request.mode === "decide") {
-            const fallback: AgentDecision = {
-              type: "final",
-              message: "done",
-            };
-
-            return decisions[decisionIndex++] ?? fallback;
-          }
-
-          onStream?.({
-            type: "text",
-            text: "Updated src/app.ts",
-          });
-
-          return {
+          const fallback: AgentDecision = {
             type: "final",
-            message: "Updated src/app.ts",
-          } satisfies AgentDecision;
+            message: "done",
+          };
+
+          return decisions[decisionIndex++] ?? fallback;
         },
       ),
       getStatus: vi.fn(
@@ -446,7 +434,7 @@ describe("app store", () => {
     expect(store.getState().modelStatus.progress).toBe(100);
   });
 
-  it("forces a write_file step when a file write request gets a premature final answer", async () => {
+  it("calls write_file when the model outputs a tool call", async () => {
     const database = new AppDatabase(`web-bro-test-${crypto.randomUUID()}`);
     const { files, runtime } = createMockRuntime({
       "src/app.ts": "export const app = 'initial';\n",
@@ -454,35 +442,16 @@ describe("app store", () => {
 
     runtime.llm.generateTurn = vi.fn(
       async (
-        request: GenerateTurnRequest,
-        onStream?: (chunk: { type: "text"; text: string }) => void,
+        _request: GenerateTurnRequest,
+        _onStream?: (chunk: { type: "text"; text: string }) => void,
       ): Promise<AgentDecision> => {
-        if (request.mode === "decide") {
-          if (request.agentNotes?.length) {
-            return {
-              type: "tool",
-              tool: "write_file",
-              args: {
-                path: "web-bro.md",
-                content: "# Web Bro\n\nI introduce myself here.\n",
-              },
-            };
-          }
-
-          return {
-            type: "final",
-            message: "Here is the draft for web-bro.md.",
-          };
-        }
-
-        onStream?.({
-          type: "text",
-          text: "Created web-bro.md.",
-        });
-
         return {
-          type: "final",
-          message: "Created web-bro.md.",
+          type: "tool",
+          tool: "write_file",
+          args: {
+            path: "web-bro.md",
+            content: "# Web Bro\n\nI introduce myself here.\n",
+          },
         };
       },
     );

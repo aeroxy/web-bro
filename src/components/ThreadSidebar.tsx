@@ -12,10 +12,10 @@ function describeLastMessage(thread: ChatThread): string {
   }
 
   if (lastMessage.role === "tool") {
-    return lastMessage.summary;
+    return lastMessage.summary ?? "Tool call";
   }
 
-  return lastMessage.content;
+  return lastMessage.content ?? "";
 }
 
 export function ThreadSidebar() {
