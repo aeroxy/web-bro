@@ -132,7 +132,7 @@ export function ThreadSidebar() {
           ) : null}
 
           <p className="mt-4 text-xs leading-6 text-slate-500">
-            Qwen 3.5 0.8B ONNX on WebGPU. Cache source:{" "}
+            Qwen 3.5 2B ONNX on WebGPU. Cache source:{" "}
             {modelCache.source ?? "pending"}.
           </p>
 

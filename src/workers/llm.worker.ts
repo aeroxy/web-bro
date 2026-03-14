@@ -19,7 +19,7 @@ import type {
 } from "../lib/contracts";
 import { extractFirstJsonObject } from "../lib/text";
 
-const MODEL_ID = "onnx-community/Qwen3.5-0.8B-ONNX";
+const MODEL_ID = "onnx-community/Qwen3.5-2B-ONNX";
 const DEBUG_PREFIX = "[Web Bro][LLM]";
 const interruptCriteria = new InterruptableStoppingCriteria();
 const TOKENIZER_PROGRESS_SHARE = 0.12;
@@ -29,8 +29,8 @@ const MODEL_FILES = [
   "generation_config.json",
   "tokenizer.json",
   "tokenizer_config.json",
-  "chat_template.json",
-  "special_tokens_map.json",
+  "preprocessor_config.json",
+  "processor_config.json",
   "onnx/decoder_model_merged_q4.onnx",
   "onnx/decoder_model_merged_q4.onnx_data",
   "onnx/embed_tokens_q4.onnx",
@@ -715,7 +715,7 @@ async function generateText(
     const output = await model.generate({
       ...inputs,
       do_sample: false,
-      max_new_tokens: 384,
+      max_new_tokens: 1024,
       repetition_penalty: 1.05,
       stopping_criteria: [interruptCriteria],
       streamer,

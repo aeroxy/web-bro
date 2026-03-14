@@ -4,7 +4,7 @@ Browser-only workspace agent built with transformer.js.
 
 ## What It Does
 
-- Runs Qwen 3.5 0.8B ONNX fully in the browser on WebGPU.
+- Runs Qwen 3.5 2B ONNX fully in the browser on WebGPU.
 - Lets the user pick a local folder as the workspace with the File System Access API.
 - Uses a shallow tool loop for `list_dir`, `search_text`, `read_file`, and `write_file`.
 - Writes directly into the selected workspace, snapshots the previous contents in IndexedDB, and shows a diff with one-click undo.
