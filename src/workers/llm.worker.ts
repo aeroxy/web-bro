@@ -33,8 +33,11 @@ const MODEL_FILES = [
   "chat_template.json",
   "special_tokens_map.json",
   "onnx/decoder_model_merged_q4.onnx",
+  "onnx/decoder_model_merged_q4.onnx_data",
   "onnx/embed_tokens_q4.onnx",
+  "onnx/embed_tokens_q4.onnx_data",
   "onnx/vision_encoder_q4.onnx",
+  "onnx/vision_encoder_q4.onnx_data",
 ] as const;
 
 let tokenizerPromise: Promise<
@@ -123,7 +126,9 @@ function updateLoadingStatus(
   const label =
     stage === "tokenizer"
       ? "Preparing tokenizer assets"
-      : "Downloading model weights";
+      : activeCacheSource === "folder"
+        ? "Loading model weights from folder"
+        : "Downloading model weights";
   const fileLabel = toFileLabel(event?.file);
   const progress =
     event?.status === "done" ? end : scaleProgress(event?.progress, start, end);
@@ -331,17 +336,19 @@ const folderBackedCache = {
       });
     }
 
-    const browserCache = await getBrowserCache();
-    const browserResponse = browserCache
-      ? await browserCache.match(cacheKey)
-      : undefined;
+    if (!modelCacheFolder || modelCachePermission !== "granted") {
+      const browserCache = await getBrowserCache();
+      const browserResponse = browserCache
+        ? await browserCache.match(cacheKey)
+        : undefined;
 
-    if (browserResponse) {
-      setActiveCacheSource("browser-cache");
-      debugLog("cache:browser-hit", {
-        key: cacheKey,
-      });
-      return browserResponse;
+      if (browserResponse) {
+        setActiveCacheSource("browser-cache");
+        debugLog("cache:browser-hit", {
+          key: cacheKey,
+        });
+        return browserResponse;
+      }
     }
 
     return undefined;
