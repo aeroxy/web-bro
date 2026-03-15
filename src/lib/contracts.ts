@@ -107,18 +107,11 @@ export interface AgentErrorResponse {
   raw: string;
 }
 
-export interface AgentContinueResponse {
-  type: "continue";
-  content: string;
-  raw: string;
-}
-
 export type AgentDecision =
   | AgentToolCall
   | AgentFinalResponse
   | AgentIncompleteResponse
-  | AgentErrorResponse
-  | AgentContinueResponse;
+  | AgentErrorResponse;
 
 export interface ModelConversationMessage {
   role: "user" | "assistant" | "system" | "tool";

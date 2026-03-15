@@ -14,6 +14,7 @@ import type {
 } from "../lib/contracts";
 import { AppDatabase } from "../lib/db";
 import type { RuntimeServices } from "../services/runtime";
+import { renderGenerationPrompt } from "../workers/llm.worker";
 
 function createFakeHandle(name = "workspace"): FileSystemDirectoryHandle {
   return {
@@ -616,7 +617,7 @@ describe("app store", () => {
       },
       {
         role: "assistant",
-        content: '[TOOL]{"tool":"read_file","args":{"path":"src/app.ts"}}[END]',
+        content: '[TOOL:read_file]{"path":"src/app.ts"}[END]',
       },
       {
         role: "tool",
@@ -645,7 +646,7 @@ describe("app store", () => {
             decision: {
               type: "error",
               message: "Tool call requested but no valid JSON found.",
-              raw: '[TOOL]{"tool":"write_file","args":{"path":"hi.txt","content":"Hi! ..."}[END]',
+              raw: '[TOOL:write_file]{"path":"hi.txt","content":"Hi! ..."[END]',
             },
             prompt:
               "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n",
@@ -701,8 +702,7 @@ describe("app store", () => {
       },
       {
         role: "assistant",
-        content:
-          '[TOOL]{"tool":"write_file","args":{"path":"hi.txt","content":"Hi! ..."}[END]',
+        content: '[TOOL:write_file]{"path":"hi.txt","content":"Hi! ..."[END]',
       },
       {
         role: "tool",
@@ -730,9 +730,8 @@ describe("app store", () => {
           return {
             decision: {
               type: "error",
-              message:
-                "Response must start with [TEXT], [TOOL], or [CONTINUE].",
-              raw: '[TOOL{"tool":"write_file","args":{"path":"hi.txt","content":"Hi! ..."}[END]',
+              message: "Response must start with [TEXT] or [TOOL:name].",
+              raw: '[TOOLwrite_file]{"path":"hi.txt","content":"Hi! ..."[END]',
             },
             prompt:
               "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n",
@@ -788,15 +787,129 @@ describe("app store", () => {
       },
       {
         role: "assistant",
-        content:
-          '[TOOL{"tool":"write_file","args":{"path":"hi.txt","content":"Hi! ..."}[END]',
+        content: '[TOOLwrite_file]{"path":"hi.txt","content":"Hi! ..."[END]',
       },
       {
         role: "system",
         content:
-          "Format error: The previous msg is malformed. Response must start with [TEXT], [TOOL], or [CONTINUE]. Try again.",
+          "Format error: The previous msg is malformed. Response must start with [TEXT] or [TOOL:name]. Try again.",
       },
     ]);
+  });
+
+  it("continues incomplete tool calls across turns until end tag arrives", async () => {
+    const database = new AppDatabase(`web-bro-test-${crypto.randomUUID()}`);
+    const { files, runtime } = createMockRuntime({});
+    const requests: GenerateTurnRequest[] = [];
+
+    runtime.llm.generateTurn = vi.fn(
+      async (
+        request: GenerateTurnRequest,
+        _onStream?: (chunk: { type: "text"; text: string }) => void,
+      ): Promise<GenerateTurnResult> => {
+        requests.push(request);
+
+        if (requests.length === 1) {
+          return {
+            decision: {
+              type: "incomplete",
+              partial: '[TOOL:write_file]{"path":"poem.txt","content":"hello',
+              raw: '[TOOL:write_file]{"path":"poem.txt","content":"hello',
+            },
+            prompt:
+              "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n",
+          };
+        }
+
+        return {
+          decision: {
+            type: "tool",
+            tool: "write_file",
+            args: {
+              path: "poem.txt",
+              content: "hello world",
+            },
+            raw: ' world"}[END]',
+          },
+          prompt:
+            "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n<think>\nI did not finish my last tool call. Continue the same [TOOL:name] response and only add [END] when the full tool call is complete.\n</think>\n",
+        };
+      },
+    );
+
+    const store = createAppStore({
+      capabilityReport: {
+        hasDirectoryPicker: true,
+        hasWebGPU: true,
+        isChromium: true,
+        isSecureContext: true,
+        reasons: [],
+        supported: true,
+      },
+      database,
+      pickWorkspace: async () => createFakeHandle(),
+      runtime,
+    });
+
+    await store.getState().initialize();
+    store.setState((state) => ({
+      ...state,
+      workspace: {
+        ...state.workspace,
+        handle: createFakeHandle(),
+        name: "workspace",
+        permission: "granted",
+        reconnectRequired: false,
+        summary: 'Workspace "workspace" has 0 files.',
+        tree: [],
+      },
+    }));
+
+    await store.getState().sendPrompt("write a poem in poem.txt for me");
+
+    expect(requests.length).toBeGreaterThanOrEqual(2);
+    expect(requests[1]?.conversation).toEqual([
+      {
+        role: "user",
+        content: "write a poem in poem.txt for me",
+      },
+      {
+        role: "assistant",
+        content: '[TOOL:write_file]{"path":"poem.txt","content":"hello',
+      },
+    ]);
+    expect(requests[1]?.partialOutput).toBe(
+      '[TOOL:write_file]{"path":"poem.txt","content":"hello',
+    );
+    expect(files.get("poem.txt")?.content).toBe("hello world");
+  });
+
+  it("omits continuation think prefill when partial output already exists", () => {
+    const prompt = renderGenerationPrompt({
+      conversation: [
+        {
+          role: "user",
+          content: "write a poem.txt for me",
+        },
+        {
+          role: "assistant",
+          content: '[TOOL:write_file]{"path":"poem.txt","content":"hello',
+        },
+      ],
+      workspaceSummary: null,
+      agentNotes: [
+        "I did not finish my last tool call. Continue from where I left off.",
+      ],
+      partialOutput: '[TOOL:write_file]{"path":"poem.txt","content":"hello',
+    });
+
+    expect(prompt).toContain(
+      '<|im_start|>assistant\n[TOOL:write_file]{"path":"poem.txt","content":"hello',
+    );
+    expect(prompt).not.toContain(
+      '[TOOL:write_file]{"path":"poem.txt","content":"hello<|im_end|>',
+    );
+    expect(prompt).not.toContain("<think>");
   });
 
   it("deletes the active thread, clears its diff, and creates a replacement when needed", async () => {

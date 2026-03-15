@@ -229,15 +229,7 @@ function buildToolCallPreview(call: AgentToolCall): string {
 }
 
 function serializeToolCall(call: AgentToolCall): string {
-  return `[TOOL]${JSON.stringify(
-    {
-      tool: call.tool,
-      args: call.args,
-      ...(call.reason ? { reason: call.reason } : {}),
-    },
-    null,
-    0,
-  )}[END]`;
+  return `[TOOL:${call.tool}]${JSON.stringify(call.args, null, 0)}[END]`;
 }
 
 const FILE_PERMISSION_DESCRIPTOR: FileSystemHandlePermissionDescriptor = {
@@ -1063,7 +1055,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
           let retryMessages: ModelConversationMessage[] = [];
           const knownRevisions = new Map<string, string | null>();
           let accumulatedContent = ""; // For accumulating partial outputs
-          const currentTag: "[TEXT]" | "[TOOL]" | null = null;
+          let currentTag: "[TEXT]" | "[TOOL]" | null = null;
           let formatRetryCount = 0;
 
           let step = 0;
@@ -1167,12 +1159,24 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
             // Handle incomplete responses - accumulate and continue
             if (decision.type === "incomplete") {
               accumulatedContent += decision.partial;
-              if (!agentNotes.some((n) => n.includes("[CONTINUE]"))) {
+              retryMessages = [
+                {
+                  role: "assistant",
+                  content: accumulatedContent,
+                },
+              ];
+              if (decision.partial.startsWith("[TOOL:")) {
+                currentTag = "[TOOL]";
+              } else if (decision.partial.startsWith("[TEXT]")) {
+                currentTag = "[TEXT]";
+              }
+              if (agentNotes.length === 0) {
                 agentNotes.push(
-                  "Your previous response was cut off. Continue using [CONTINUE]content[END] format.",
+                  currentTag === "[TOOL]"
+                    ? "I did not finish my last tool call due to the output limit. Continue from where I left off (DON'T repeat myself, DON'T start from [TOOL:name] again) and only add [END] when the full tool call is complete."
+                    : "I did not finish my last response due to the output limit. Continue from where I left off (DON'T repeat myself, DON'T start from [TEXT] again) and only add [END] when the full response is complete.",
                 );
               }
-              retryMessages = [];
               continue;
             }
 
@@ -1181,7 +1185,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
               formatRetryCount++;
               if (formatRetryCount >= 2) {
                 await appendAssistantMessage(
-                  `Format error: ${decision.message}. Please use [TEXT]...[END] or [TOOL]{json}[END].`,
+                  `Format error: ${decision.message}. Please use [TEXT]...[END] or [TOOL:name]{json}[END].`,
                   "error",
                 );
                 return;
@@ -1222,17 +1226,9 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
                 decision.message === "Tool call JSON could not be parsed."
               ) {
                 agentNotes.push(
-                  "Begin with [TOOL] in the answer, and end with [END].",
+                  "Begin with [TOOL:name] in the answer, and end with [END].",
                 );
               }
-              continue;
-            }
-
-            // Handle continue responses (from [CONTINUE] tag)
-            if (decision.type === "continue") {
-              accumulatedContent += decision.content;
-              // Keep looping - model will eventually finish or we hit maxLoops
-              retryMessages = [];
               continue;
             }
 
@@ -1251,6 +1247,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
                 finalResponse = decision;
               }
               retryMessages = [];
+              currentTag = null;
               break;
             }
 
@@ -1263,6 +1260,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
                 // This is a fallback - ideally the tool call is complete now
               }
               retryMessages = [];
+              currentTag = null;
               // Proceed with tool execution below
             } else {
               break;
@@ -1353,7 +1351,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
             }));
           }
 
-          // We should have a final response from [TEXT] or accumulated [CONTINUE] content
+          // We should have a final response from [TEXT] or accumulated continuation content
           const message =
             finalResponse?.message.trim() || accumulatedContent.trim();
           if (message) {

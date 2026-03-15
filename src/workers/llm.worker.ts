@@ -9,6 +9,7 @@ import { expose } from "comlink";
 
 import type {
   AgentDecision,
+  AgentToolName,
   GenerateTurnRequest,
   GenerateTurnResult,
   ModelCacheSource,
@@ -465,17 +466,18 @@ export const SYSTEM_PROMPT = [
   "",
   "YOUR RESPONSE MUST USE EXACTLY ONE TAG:",
   "1. [TEXT]...[END]  - Talking only, no action taken",
-  '2. [TOOL]{"tool":"name","args":{...}}[END] - Actually does something',
+  "2. [TOOL:name]{...}[END] - Actually does something",
   "",
-  "ALWAYS start your answer with [TEXT] or [TOOL].",
-  "NEVER explain what you will do in [TEXT] - just do it with [TOOL].",
-  "TOOL RESPONSES MUST be valid JSON immediately after [TOOL] and MUST end with [END].",
+  "ALWAYS start your answer with [TEXT] or [TOOL:name].",
+  "NEVER explain what you will do in [TEXT] - just do it with [TOOL:name].",
+  "TOOL RESPONSES MUST put the tool name in the tag and the args JSON immediately after it.",
   "Be extremely careful to produce valid JSON with all braces and quotes closed.",
-  "Before finishing a [TOOL] response, ensure the JSON object is complete and exactly wrapped as [TOOL]{...}[END].",
-  'Valid example: [TOOL]{"tool":"list_dir","args":{"path":"."}}[END]',
+  "Before finishing a [TOOL] response, ensure the JSON object is complete and exactly wrapped as [TOOL:name]{...}[END].",
+  "[END] means the response is fully complete. If you are still writing the same [TEXT] or [TOOL:name] response, do not output [END] yet.",
+  'Valid example: [TOOL:list_dir]{"path":"."}[END]',
   "",
   "IF THE USER WANTS A FILE CREATED:",
-  "- Use ONLY [TOOL] with write_file. Do NOT use [TEXT] first.",
+  "- Use ONLY [TOOL:write_file]{...}[END]. Do NOT use [TEXT] first.",
   "- Writing in [TEXT] does NOT create a file.",
   "",
   "YOUR TOOLS:",
@@ -484,33 +486,10 @@ export const SYSTEM_PROMPT = [
   'search_text:{"query":string}',
   'write_file:{"path":string,"content":string}',
   "",
-  "Use exactly one of those tool names in the tool JSON.",
+  "Use exactly one of those tool names in the [TOOL:name] tag.",
 ].join("\n");
 
-export const buildContinuePrompt = (isToolCall: boolean): string => {
-  if (isToolCall) {
-    return [
-      "Your previous tool call JSON was cut off.",
-      "Continue the JSON from where it stopped using: [CONTINUE]more[END]",
-      "Do NOT repeat what was already output.",
-      "You MUST end with [END]. No [END] = rejected.",
-    ].join("\n");
-  }
-  return [
-    "Your previous response was cut off.",
-    "Continue from where you stopped using: [CONTINUE]more[END]",
-    "Do NOT repeat what was already output.",
-    "You MUST end with [END]. No [END] = rejected.",
-  ].join("\n");
-};
-
 export function getSystemPrompt(request: GenerateTurnRequest): string {
-  if (request.partialOutput) {
-    const isToolCall =
-      request.partialOutput.includes('"tool"') ||
-      request.partialOutput.includes('"args"');
-    return buildContinuePrompt(isToolCall);
-  }
   const context = buildSystemContext(request);
   return context ? `${SYSTEM_PROMPT}\n\n${context}` : SYSTEM_PROMPT;
 }
@@ -533,7 +512,26 @@ function renderChatMl(messages: { role: string; content: string }[]): string {
     .join("\n");
 }
 
+function renderOpenAssistantContinuation(content: string): string {
+  return `<|im_start|>assistant\n${content}`;
+}
+
 export function renderGenerationPrompt(request: GenerateTurnRequest): string {
+  if (request.partialOutput) {
+    const messages = buildMessages(request);
+    const lastMessage = messages.at(-1);
+
+    if (
+      lastMessage?.role === "assistant" &&
+      lastMessage.content === request.partialOutput
+    ) {
+      const prefix = messages.slice(0, -1);
+      const serializedPrefix =
+        prefix.length > 0 ? `${renderChatMl(prefix)}\n` : "";
+      return `${serializedPrefix}${renderOpenAssistantContinuation(lastMessage.content)}`;
+    }
+  }
+
   const prompt = renderChatMl(buildMessages(request));
   const thinkContent = request.agentNotes?.length
     ? request.agentNotes.join("\n")
@@ -542,7 +540,23 @@ export function renderGenerationPrompt(request: GenerateTurnRequest): string {
   return `${prompt}\n<|im_start|>assistant\n<think>\n${thinkContent}\n</think>\n`;
 }
 
-function normalizeDecision(raw: string): AgentDecision {
+function repairJson(str: string): string {
+  let repaired = str;
+  const open = (repaired.match(/{/g) || []).length;
+  let close = (repaired.match(/}/g) || []).length;
+
+  while (close < open) {
+    repaired += "}";
+    close += 1;
+  }
+
+  return repaired;
+}
+
+function normalizeDecision(
+  raw: string,
+  allowBareContinuation = false,
+): AgentDecision {
   debugLog("decide:raw-output", {
     preview: previewText(raw),
   });
@@ -551,51 +565,51 @@ function normalizeDecision(raw: string): AgentDecision {
   const hasEndTag = trimmed.endsWith("[END]");
   const content = hasEndTag ? trimmed.slice(0, -5).trimEnd() : trimmed;
 
-  // Must start with a valid tag
-  const validTags = ["[TEXT]", "[TOOL]", "[CONTINUE]"];
-  const matchedTag = validTags.find((tag) => content.startsWith(tag));
+  const toolTagMatch = content.match(/^\[TOOL:([a-z_]+)\]/);
 
-  if (!matchedTag) {
-    debugLog("decide:invalid-format", { preview: previewText(content) });
-    return {
-      type: "error",
-      message: "Response must start with [TEXT], [TOOL], or [CONTINUE].",
-      raw,
-    };
-  }
-
-  const afterTag = content.slice(matchedTag.length).trim();
-
-  // Handle [CONTINUE] tag
-  if (matchedTag === "[CONTINUE]") {
-    if (!hasEndTag) {
-      debugLog("decide:continue-incomplete");
+  if (allowBareContinuation && !content.startsWith("[TEXT]") && !toolTagMatch) {
+    if (hasEndTag) {
       return {
-        type: "incomplete",
-        partial: afterTag,
+        type: "final",
+        message: content || "Done.",
         raw,
       };
     }
+
     return {
-      type: "continue",
-      content: afterTag,
+      type: "incomplete",
+      partial: content,
       raw,
     };
   }
 
-  // Handle [TOOL] tag
-  if (matchedTag === "[TOOL]") {
-    const candidate = extractFirstJsonObject(afterTag);
+  if (!content.startsWith("[TEXT]") && !toolTagMatch) {
+    debugLog("decide:invalid-format", { preview: previewText(content) });
+    return {
+      type: "error",
+      message: "Response must start with [TEXT] or [TOOL:name].",
+      raw,
+    };
+  }
 
-    if (!candidate) {
-      if (!hasEndTag) {
-        debugLog("decide:tool-incomplete");
-        return {
-          type: "incomplete",
-          partial: afterTag,
-          raw,
-        };
-      }
+  // Handle [TOOL:name] tag
+  if (toolTagMatch) {
+    const tool = toolTagMatch[1] as AgentToolName;
+    const afterTag = content.slice(toolTagMatch[0].length).trim();
+
+    if (!hasEndTag) {
+      debugLog("decide:tool-incomplete");
+      return {
+        type: "incomplete",
+        partial: content,
+        raw,
+      };
+    }
+
+    const repaired = repairJson(afterTag);
+    const candidate = extractFirstJsonObject(repaired) ?? repaired;
+
+    if (!candidate.trim()) {
       return {
         type: "error",
         message: "Tool call requested but no valid JSON found.",
@@ -604,18 +618,16 @@ function normalizeDecision(raw: string): AgentDecision {
     }
 
     try {
-      const parsed = JSON.parse(candidate);
+      const args = JSON.parse(candidate);
 
-      if (parsed.tool && parsed.args) {
+      if (args && typeof args === "object" && !Array.isArray(args)) {
         debugLog("decide:tool-parsed", {
-          tool: parsed.tool,
-          reason: parsed.reason,
+          tool,
         });
         return {
           type: "tool",
-          tool: parsed.tool,
-          args: parsed.args,
-          reason: parsed.reason,
+          tool,
+          args,
           raw,
         };
       }
@@ -631,11 +643,12 @@ function normalizeDecision(raw: string): AgentDecision {
   }
 
   // Handle [TEXT] tag
+  const afterTag = content.slice("[TEXT]".length).trim();
   if (!hasEndTag) {
     debugLog("decide:text-incomplete");
     return {
       type: "incomplete",
-      partial: afterTag,
+      partial: content,
       raw,
     };
   }
@@ -842,7 +855,7 @@ const llmApi: ModelWorkerAPI = {
 
   async generateTurn(request, onStream) {
     const { output, prompt } = await generateText(request, onStream);
-    const decision = normalizeDecision(output);
+    const decision = normalizeDecision(output, Boolean(request.partialOutput));
     return {
       decision,
       prompt,
