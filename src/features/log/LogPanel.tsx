@@ -26,7 +26,7 @@ function formatLogForCopy(entry: LogEntry): string {
       parts.push(`Result: ${JSON.stringify(entry.toolResult, null, 2)}`);
     }
   } else {
-    parts.push(`Payload:\n${entry.payload || "(not captured)"}`);
+    parts.push(`Payload:\n${entry.payload ?? ""}`);
     if (entry.raw) {
       parts.push(`Raw Output:\n${entry.raw}`);
     }
@@ -83,13 +83,11 @@ function LogEntryComponent({ entry }: { entry: LogEntry }) {
               error
             </span>
           )}
-          {entry.streamingChunks &&
-            entry.streamingChunks.length > 0 &&
-            !entry.streamingComplete && (
-              <span className="rounded-2xl bg-yellow-500/12 px-2 py-1 text-xs text-yellow-300">
-                streaming...
-              </span>
-            )}
+          {!entry.toolName && !entry.finished && !entry.error && (
+            <span className="rounded-2xl bg-yellow-500/12 px-2 py-1 text-xs text-yellow-300">
+              streaming...
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -135,7 +133,7 @@ function LogEntryComponent({ entry }: { entry: LogEntry }) {
                     Raw Prompt Sent to Model
                   </p>
                   <pre className="whitespace-pre-wrap font-mono text-xs text-slate-300 max-h-96 overflow-auto">
-                    {entry.payload || "(not captured)"}
+                    {entry.payload ?? ""}
                   </pre>
                 </div>
                 {entry.raw && (

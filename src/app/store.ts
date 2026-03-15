@@ -41,6 +41,7 @@ import {
   truncate,
 } from "../lib/text";
 import { getRuntime, type RuntimeServices } from "../services/runtime";
+import { renderGenerationPrompt } from "../workers/llm.worker";
 
 export interface LogEntry {
   id: string;
@@ -49,7 +50,7 @@ export interface LogEntry {
   raw?: string;
   parsed?: AgentDecision;
   streamingChunks?: string[];
-  streamingComplete?: boolean;
+  finished?: boolean;
   error?: string | null;
   toolName?: AgentToolName;
   toolArgs?: any;
@@ -225,6 +226,18 @@ function buildToolCallPreview(call: AgentToolCall): string {
         2,
       );
   }
+}
+
+function serializeToolCall(call: AgentToolCall): string {
+  return `[TOOL]${JSON.stringify(
+    {
+      tool: call.tool,
+      args: call.args,
+      ...(call.reason ? { reason: call.reason } : {}),
+    },
+    null,
+    0,
+  )}[END]`;
 }
 
 const FILE_PERMISSION_DESCRIPTOR: FileSystemHandlePermissionDescriptor = {
@@ -1083,14 +1096,14 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
             const logEntry: LogEntry = {
               id: logId,
               timestamp: now(),
-              payload: "",
+              payload: renderGenerationPrompt(turnRequest),
               raw: "",
               parsed: {
                 type: "final",
                 message: "",
               },
               streamingChunks: [],
-              streamingComplete: false,
+              finished: false,
               error: null,
             };
             get().addLog(logEntry);
@@ -1129,6 +1142,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
               if (currentLog) {
                 get().updateLog({
                   ...currentLog,
+                  finished: true,
                   error: errorMessage,
                 });
               }
@@ -1142,7 +1156,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
                 ...updatedLog,
                 raw: decision.raw ?? "",
                 parsed: decision,
-                streamingComplete: true,
+                finished: true,
               });
             }
 
@@ -1212,9 +1226,17 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
 
             step += 1;
 
+            const assistantToolMessageId = createId();
             const toolMessageId = createId();
 
             thread = await updateCurrentThread((current) => {
+              const assistantToolMessage: AssistantMessage = {
+                content: serializeToolCall(decision),
+                createdAt: now(),
+                id: assistantToolMessageId,
+                role: "assistant",
+                status: "complete",
+              };
               const toolMessage: ToolMessage = {
                 call: buildToolCallPreview(decision),
                 createdAt: now(),
@@ -1228,7 +1250,11 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
 
               return {
                 ...current,
-                messages: [...current.messages, toolMessage],
+                messages: [
+                  ...current.messages,
+                  assistantToolMessage,
+                  toolMessage,
+                ],
               };
             });
 

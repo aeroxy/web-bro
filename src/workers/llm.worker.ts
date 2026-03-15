@@ -449,9 +449,6 @@ function buildSystemContext(request: GenerateTurnRequest): string | null {
     request.workspaceSummary
       ? ["CURRENT WORKSPACE CONTEXT:", request.workspaceSummary].join("\n")
       : null,
-    request.agentNotes?.length
-      ? ["CURRENT GUIDANCE:", ...request.agentNotes].join("\n")
-      : null,
   ].filter((section): section is string => Boolean(section));
 
   if (sections.length === 0) {
@@ -524,6 +521,23 @@ function buildMessages(request: GenerateTurnRequest) {
     },
     ...request.conversation,
   ];
+}
+
+function renderChatMl(messages: { role: string; content: string }[]): string {
+  return messages
+    .map(
+      (message) => `<|im_start|>${message.role}\n${message.content}<|im_end|>`,
+    )
+    .join("\n");
+}
+
+export function renderGenerationPrompt(request: GenerateTurnRequest): string {
+  const prompt = renderChatMl(buildMessages(request));
+  const thinkContent = request.agentNotes?.length
+    ? request.agentNotes.join("\n")
+    : "";
+
+  return `${prompt}<|im_start|>assistant\n<think>\n${thinkContent}\n</think>\n`;
 }
 
 function normalizeDecision(raw: string): AgentDecision {
@@ -643,13 +657,7 @@ async function generateText(
     conversationMessages: request.conversation.length,
   });
   const { tokenizer, model } = await loadResources();
-  const messages = buildMessages(request);
-  const prompt = String(
-    tokenizer.apply_chat_template(messages, {
-      add_generation_prompt: true,
-      tokenize: false,
-    }),
-  );
+  const prompt = renderGenerationPrompt(request);
   const inputs = tokenizer(prompt, {
     return_tensor: true,
   });

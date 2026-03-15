@@ -615,6 +615,10 @@ describe("app store", () => {
         content: "Read src/app.ts and tell me about it.",
       },
       {
+        role: "assistant",
+        content: '[TOOL]{"tool":"read_file","args":{"path":"src/app.ts"}}[END]',
+      },
+      {
         role: "tool",
         content:
           "[Tool: read_file]\nStatus: SUCCESS\nSummary: Read src/app.ts.\nResult:\nsrc/app.ts\n\nexport const app = 'initial';\n",
