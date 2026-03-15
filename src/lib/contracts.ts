@@ -121,7 +121,7 @@ export type AgentDecision =
   | AgentContinueResponse;
 
 export interface ModelConversationMessage {
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "system" | "tool";
   content: string;
 }
 
@@ -139,6 +139,11 @@ export interface GenerateTurnRequest {
   workspaceSummary: string | null;
   agentNotes?: string[];
   partialOutput?: string;
+}
+
+export interface GenerateTurnResult {
+  prompt: string;
+  decision: AgentDecision;
 }
 
 export interface StreamChunk {
@@ -176,7 +181,7 @@ export interface ModelWorkerAPI {
   generateTurn(
     request: GenerateTurnRequest,
     onStream?: StreamListener,
-  ): Promise<AgentFinalResponse | AgentDecision>;
+  ): Promise<GenerateTurnResult>;
   abortGeneration(): Promise<void>;
   clearModelCachePreference(): Promise<ModelCacheStatus>;
   getModelCacheStatus(): Promise<ModelCacheStatus>;

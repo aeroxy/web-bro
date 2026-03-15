@@ -4,6 +4,7 @@ import { createAppStore } from "../app/store";
 import type {
   AgentDecision,
   GenerateTurnRequest,
+  GenerateTurnResult,
   ModelCacheStatus,
   ModelStatus,
   WorkspaceFileSnapshot,
@@ -143,13 +144,17 @@ function createMockRuntime(initialFiles: Record<string, string>) {
         async (
           _request: GenerateTurnRequest,
           _onStream?: (chunk: { type: "text"; text: string }) => void,
-        ): Promise<AgentDecision> => {
+        ): Promise<GenerateTurnResult> => {
           const fallback: AgentDecision = {
             type: "final",
             message: "done",
           };
 
-          return decisions[decisionIndex++] ?? fallback;
+          return {
+            decision: decisions[decisionIndex++] ?? fallback,
+            prompt:
+              "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n",
+          };
         },
       ),
       getStatus: vi.fn(
@@ -444,14 +449,18 @@ describe("app store", () => {
       async (
         _request: GenerateTurnRequest,
         _onStream?: (chunk: { type: "text"; text: string }) => void,
-      ): Promise<AgentDecision> => {
+      ): Promise<GenerateTurnResult> => {
         return {
-          type: "tool",
-          tool: "write_file",
-          args: {
-            path: "web-bro.md",
-            content: "# Web Bro\n\nI introduce myself here.\n",
+          decision: {
+            type: "tool",
+            tool: "write_file",
+            args: {
+              path: "web-bro.md",
+              content: "# Web Bro\n\nI introduce myself here.\n",
+            },
           },
+          prompt:
+            "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n",
         };
       },
     );
@@ -509,6 +518,108 @@ describe("app store", () => {
       "# Web Bro\n\nI introduce myself here.\n",
       null,
     );
+  });
+
+  it("sends full conversation history including assistant and tool messages", async () => {
+    const database = new AppDatabase(`web-bro-test-${crypto.randomUUID()}`);
+    const { runtime } = createMockRuntime({
+      "src/app.ts": "export const app = 'initial';\n",
+    });
+    const requests: GenerateTurnRequest[] = [];
+
+    runtime.llm.generateTurn = vi.fn(
+      async (
+        request: GenerateTurnRequest,
+        _onStream?: (chunk: { type: "text"; text: string }) => void,
+      ): Promise<GenerateTurnResult> => {
+        requests.push(request);
+
+        if (requests.length === 1) {
+          return {
+            decision: {
+              type: "tool",
+              tool: "read_file",
+              args: {
+                path: "src/app.ts",
+              },
+            },
+            prompt:
+              "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n",
+          };
+        }
+
+        return {
+          decision: {
+            type: "final",
+            message: "done",
+          },
+          prompt:
+            "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n",
+        };
+      },
+    );
+
+    const store = createAppStore({
+      capabilityReport: {
+        hasDirectoryPicker: true,
+        hasWebGPU: true,
+        isChromium: true,
+        isSecureContext: true,
+        reasons: [],
+        supported: true,
+      },
+      database,
+      pickWorkspace: async () => createFakeHandle(),
+      runtime,
+    });
+
+    await store.getState().initialize();
+    store.setState((state) => ({
+      ...state,
+      workspace: {
+        ...state.workspace,
+        handle: createFakeHandle(),
+        name: "workspace",
+        permission: "granted",
+        reconnectRequired: false,
+        summary: 'Workspace "workspace" has 1 files.',
+        tree: [
+          {
+            children: [
+              {
+                kind: "file",
+                name: "app.ts",
+                path: "src/app.ts",
+              },
+            ],
+            kind: "directory",
+            name: "src",
+            path: "src",
+          },
+        ],
+      },
+    }));
+
+    await store.getState().sendPrompt("Read src/app.ts and tell me about it.");
+
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.conversation).toEqual([
+      {
+        role: "user",
+        content: "Read src/app.ts and tell me about it.",
+      },
+    ]);
+    expect(requests[1]?.conversation).toEqual([
+      {
+        role: "user",
+        content: "Read src/app.ts and tell me about it.",
+      },
+      {
+        role: "tool",
+        content:
+          "[Tool: read_file]\nStatus: SUCCESS\nSummary: Read src/app.ts.\nResult:\nsrc/app.ts\n\nexport const app = 'initial';\n",
+      },
+    ]);
   });
 
   it("deletes the active thread, clears its diff, and creates a replacement when needed", async () => {

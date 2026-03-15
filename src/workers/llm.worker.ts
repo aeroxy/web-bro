@@ -10,6 +10,7 @@ import { expose } from "comlink";
 import type {
   AgentDecision,
   GenerateTurnRequest,
+  GenerateTurnResult,
   ModelCacheSource,
   ModelCacheStatus,
   ModelStatus,
@@ -443,57 +444,21 @@ async function loadResources() {
   return { tokenizer, model };
 }
 
-export function renderConversation(request: GenerateTurnRequest): string {
-  // Extract the original task from the first user message
-  const firstUserMessage = request.conversation.find(
-    (m) => m.role === "user" && !m.content.includes("[Tool:"),
-  );
-  const originalTask = firstUserMessage?.content.trim() ?? "No task specified";
+function buildSystemContext(request: GenerateTurnRequest): string | null {
+  const sections = [
+    request.workspaceSummary
+      ? ["CURRENT WORKSPACE CONTEXT:", request.workspaceSummary].join("\n")
+      : null,
+    request.agentNotes?.length
+      ? ["CURRENT GUIDANCE:", ...request.agentNotes].join("\n")
+      : null,
+  ].filter((section): section is string => Boolean(section));
 
-  // Separate user/assistant messages from tool results
-  const conversation = request.conversation.filter(
-    (m) => !m.content.includes("[Tool:"),
-  );
-  const toolResults = request.conversation.filter((m) =>
-    m.content.includes("[Tool:"),
-  );
-
-  const history =
-    conversation.length > 0
-      ? conversation
-          .map((m) => `${m.role.toUpperCase()}: ${m.content.trim()}`)
-          .join("\n\n")
-      : "No prior conversation.";
-
-  const toolSummary =
-    toolResults.length > 0
-      ? toolResults.map((m) => m.content.trim()).join("\n\n")
-      : null;
-
-  const agentNotes =
-    request.agentNotes && request.agentNotes.length > 0
-      ? request.agentNotes.map((note) => `- ${note}`).join("\n")
-      : "No additional guidance.";
-
-  const parts = [
-    `ORIGINAL TASK:\n${originalTask}`,
-    `WORKSPACE:\n${request.workspaceSummary ?? "No workspace connected."}`,
-    `CONVERSATION:\n${history}`,
-  ];
-
-  if (toolSummary) {
-    parts.push(`TOOL RESULTS (already completed):\n${toolSummary}`);
+  if (sections.length === 0) {
+    return null;
   }
 
-  if (request.partialOutput) {
-    parts.push(
-      `INCOMPLETE - Continue from here, do NOT repeat:\n${request.partialOutput}`,
-    );
-  }
-
-  parts.push(`GUIDANCE:\n${agentNotes}`);
-
-  return parts.join("\n\n");
+  return sections.join("\n\n");
 }
 
 export const SYSTEM_PROMPT = [
@@ -503,18 +468,24 @@ export const SYSTEM_PROMPT = [
   "",
   "YOUR RESPONSE MUST USE EXACTLY ONE TAG:",
   "1. [TEXT]...[END]  - Talking only, no action taken",
-  "2. [TOOL]{...}[END] - Actually does something",
+  '2. [TOOL]{"tool":"name","args":{...}}[END] - Actually does something',
   "",
   "NEVER use both [TEXT] and [TOOL] in one response.",
   "NEVER explain what you will do in [TEXT] - just do it with [TOOL].",
+  "TOOL RESPONSES MUST be valid JSON immediately after [TOOL] and MUST end with [END].",
+  'Valid example: [TOOL]{"tool":"list_dir","args":{"path":"."}}[END]',
   "",
   "IF THE USER WANTS A FILE CREATED:",
   "- Use ONLY [TOOL] with write_file. Do NOT use [TEXT] first.",
   "- Writing in [TEXT] does NOT create a file.",
   "",
   "YOUR TOOLS:",
-  '[TOOL] {"tool":"write_file","args":{"path":"file.txt","content":"text"},"reason":"write"} [END]',
-  '[TOOL] {"tool":"list_dir","args":{"path":"."},"reason":"list"} [END]',
+  'list_dir:{"path":"."}',
+  'read_file:{"path":string}',
+  'search_text:{"query":string}',
+  'write_file:{"path":string,"content":string}',
+  "",
+  "Use exactly one of those tool names in the tool JSON.",
 ].join("\n");
 
 export const buildContinuePrompt = (isToolCall: boolean): string => {
@@ -541,7 +512,8 @@ export function getSystemPrompt(request: GenerateTurnRequest): string {
       request.partialOutput.includes('"args"');
     return buildContinuePrompt(isToolCall);
   }
-  return SYSTEM_PROMPT;
+  const context = buildSystemContext(request);
+  return context ? `${SYSTEM_PROMPT}\n\n${context}` : SYSTEM_PROMPT;
 }
 
 function buildMessages(request: GenerateTurnRequest) {
@@ -550,10 +522,7 @@ function buildMessages(request: GenerateTurnRequest) {
       role: "system" as const,
       content: getSystemPrompt(request),
     },
-    {
-      role: "user" as const,
-      content: renderConversation(request),
-    },
+    ...request.conversation,
   ];
 }
 
@@ -668,17 +637,19 @@ function normalizeDecision(raw: string): AgentDecision {
 async function generateText(
   request: GenerateTurnRequest,
   onStream?: StreamListener,
-): Promise<string> {
+): Promise<{ output: string; prompt: string }> {
   debugLog("generate:start", {
     agentNotes: request.agentNotes?.length ?? 0,
     conversationMessages: request.conversation.length,
   });
   const { tokenizer, model } = await loadResources();
   const messages = buildMessages(request);
-  const prompt = tokenizer.apply_chat_template(messages, {
-    add_generation_prompt: true,
-    tokenize: false,
-  });
+  const prompt = String(
+    tokenizer.apply_chat_template(messages, {
+      add_generation_prompt: true,
+      tokenize: false,
+    }),
+  );
   const inputs = tokenizer(prompt, {
     return_tensor: true,
   });
@@ -735,7 +706,10 @@ async function generateText(
         detail: "Model ready on WebGPU.",
         progress: 100,
       });
-      return streamed.trim();
+      return {
+        output: streamed.trim(),
+        prompt,
+      };
     }
 
     const promptLength = inputs.input_ids.dims.at(-1) ?? 0;
@@ -762,7 +736,10 @@ async function generateText(
       characters: decoded.trim().length,
     });
 
-    return decoded.trim();
+    return {
+      output: decoded.trim(),
+      prompt,
+    };
   } catch (error) {
     if (error instanceof Error && error.message === "Generation interrupted.") {
       debugLog("generate:interrupted");
@@ -854,8 +831,12 @@ const llmApi: ModelWorkerAPI = {
   },
 
   async generateTurn(request, onStream) {
-    const output = await generateText(request, onStream);
-    return normalizeDecision(output);
+    const { output, prompt } = await generateText(request, onStream);
+    const decision = normalizeDecision(output);
+    return {
+      decision,
+      prompt,
+    } satisfies GenerateTurnResult;
   },
 
   async abortGeneration() {

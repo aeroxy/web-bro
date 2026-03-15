@@ -41,18 +41,11 @@ import {
   truncate,
 } from "../lib/text";
 import { getRuntime, type RuntimeServices } from "../services/runtime";
-import {
-  getSystemPrompt,
-  renderConversation,
-  SYSTEM_PROMPT,
-} from "../workers/llm.worker";
 
 export interface LogEntry {
   id: string;
   timestamp: string;
-  request?: GenerateTurnRequest;
-  systemPrompt?: string;
-  payload?: string; // Full prompt sent to the model
+  payload?: string;
   raw?: string;
   parsed?: AgentDecision;
   streamingChunks?: string[];
@@ -168,7 +161,6 @@ function toModelConversation(
     .slice(-12)
     .map((message) => {
       if (message.role === "tool") {
-        // Format tool messages for the LLM
         const status =
           message.status === "complete"
             ? "SUCCESS"
@@ -184,7 +176,7 @@ function toModelConversation(
           .filter(Boolean)
           .join("\n");
         return {
-          role: "user" as const, // Present tool results as user messages for the LLM
+          role: "tool" as const,
           content,
         };
       }
@@ -1088,17 +1080,10 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
               workspaceSummary: get().workspace.summary,
               partialOutput: accumulatedContent || undefined,
             };
-            // Build the full payload sent to the model
-            const systemPrompt = getSystemPrompt(turnRequest);
-            const userMessage = renderConversation(turnRequest);
-            const payload = `SYSTEM:\n${systemPrompt}\n\nUSER:\n${userMessage}`;
-
             const logEntry: LogEntry = {
               id: logId,
               timestamp: now(),
-              systemPrompt,
-              payload,
-              request: turnRequest,
+              payload: "",
               raw: "",
               parsed: {
                 type: "final",
@@ -1125,10 +1110,18 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
 
             let decision: AgentDecision;
             try {
-              decision = await runtime.llm.generateTurn(
-                logEntry.request!,
+              const result = await runtime.llm.generateTurn(
+                turnRequest,
                 onStream,
               );
+              decision = result.decision;
+              const currentLog = get().logs.find((l) => l.id === logId);
+              if (currentLog) {
+                get().updateLog({
+                  ...currentLog,
+                  payload: result.prompt,
+                });
+              }
             } catch (error) {
               const errorMessage =
                 error instanceof Error ? error.message : String(error);
@@ -1195,7 +1188,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
                   type: "final",
                   message:
                     accumulatedContent +
-                    (decision.message ? "\n" + decision.message : ""),
+                    (decision.message ? `\n${decision.message}` : ""),
                   raw: decision.raw,
                 };
               } else {

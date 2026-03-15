@@ -30,9 +30,6 @@ function formatLogForCopy(entry: LogEntry): string {
     if (entry.raw) {
       parts.push(`Raw Output:\n${entry.raw}`);
     }
-    if (entry.raw) {
-      parts.push(`Raw Output:\n${entry.raw}`);
-    }
     if (entry.parsed) {
       parts.push(`Parsed: ${JSON.stringify(entry.parsed, null, 2)}`);
     }
@@ -135,20 +132,12 @@ function LogEntryComponent({ entry }: { entry: LogEntry }) {
               <>
                 <div>
                   <p className="mb-2 text-xs font-medium text-slate-400">
-                    Payload Sent to Model
+                    Raw Prompt Sent to Model
                   </p>
                   <pre className="whitespace-pre-wrap font-mono text-xs text-slate-300 max-h-96 overflow-auto">
                     {entry.payload || "(not captured)"}
                   </pre>
                 </div>
-                {entry.request && (
-                  <div>
-                    <p className="mb-2 text-xs font-medium text-slate-400">
-                      Request
-                    </p>
-                    <JsonDisplay data={entry.request} />
-                  </div>
-                )}
                 {entry.raw && (
                   <div>
                     <p className="mb-2 text-xs font-medium text-slate-400">
