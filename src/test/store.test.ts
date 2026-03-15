@@ -626,6 +626,179 @@ describe("app store", () => {
     ]);
   });
 
+  it("retries malformed tool json by replaying assistant output and tool error", async () => {
+    const database = new AppDatabase(`web-bro-test-${crypto.randomUUID()}`);
+    const { runtime } = createMockRuntime({
+      "src/app.ts": "export const app = 'initial';\n",
+    });
+    const requests: GenerateTurnRequest[] = [];
+
+    runtime.llm.generateTurn = vi.fn(
+      async (
+        request: GenerateTurnRequest,
+        _onStream?: (chunk: { type: "text"; text: string }) => void,
+      ): Promise<GenerateTurnResult> => {
+        requests.push(request);
+
+        if (requests.length === 1) {
+          return {
+            decision: {
+              type: "error",
+              message: "Tool call requested but no valid JSON found.",
+              raw: '[TOOL]{"tool":"write_file","args":{"path":"hi.txt","content":"Hi! ..."}[END]',
+            },
+            prompt:
+              "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n",
+          };
+        }
+
+        return {
+          decision: {
+            type: "final",
+            message: "done",
+          },
+          prompt:
+            "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n",
+        };
+      },
+    );
+
+    const store = createAppStore({
+      capabilityReport: {
+        hasDirectoryPicker: true,
+        hasWebGPU: true,
+        isChromium: true,
+        isSecureContext: true,
+        reasons: [],
+        supported: true,
+      },
+      database,
+      pickWorkspace: async () => createFakeHandle(),
+      runtime,
+    });
+
+    await store.getState().initialize();
+    store.setState((state) => ({
+      ...state,
+      workspace: {
+        ...state.workspace,
+        handle: createFakeHandle(),
+        name: "workspace",
+        permission: "granted",
+        reconnectRequired: false,
+        summary: 'Workspace "workspace" has 1 files.',
+        tree: [],
+      },
+    }));
+
+    await store.getState().sendPrompt("hi intro urself in hi.txt :)");
+
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.conversation).toEqual([
+      {
+        role: "user",
+        content: "hi intro urself in hi.txt :)",
+      },
+      {
+        role: "assistant",
+        content:
+          '[TOOL]{"tool":"write_file","args":{"path":"hi.txt","content":"Hi! ..."}[END]',
+      },
+      {
+        role: "tool",
+        content:
+          "Format error: Tool call requested but no valid JSON found. Try again.",
+      },
+    ]);
+  });
+
+  it("retries fully malformed output by replaying assistant output and system correction", async () => {
+    const database = new AppDatabase(`web-bro-test-${crypto.randomUUID()}`);
+    const { runtime } = createMockRuntime({
+      "src/app.ts": "export const app = 'initial';\n",
+    });
+    const requests: GenerateTurnRequest[] = [];
+
+    runtime.llm.generateTurn = vi.fn(
+      async (
+        request: GenerateTurnRequest,
+        _onStream?: (chunk: { type: "text"; text: string }) => void,
+      ): Promise<GenerateTurnResult> => {
+        requests.push(request);
+
+        if (requests.length === 1) {
+          return {
+            decision: {
+              type: "error",
+              message:
+                "Response must start with [TEXT], [TOOL], or [CONTINUE].",
+              raw: '[TOOL{"tool":"write_file","args":{"path":"hi.txt","content":"Hi! ..."}[END]',
+            },
+            prompt:
+              "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n",
+          };
+        }
+
+        return {
+          decision: {
+            type: "final",
+            message: "done",
+          },
+          prompt:
+            "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n",
+        };
+      },
+    );
+
+    const store = createAppStore({
+      capabilityReport: {
+        hasDirectoryPicker: true,
+        hasWebGPU: true,
+        isChromium: true,
+        isSecureContext: true,
+        reasons: [],
+        supported: true,
+      },
+      database,
+      pickWorkspace: async () => createFakeHandle(),
+      runtime,
+    });
+
+    await store.getState().initialize();
+    store.setState((state) => ({
+      ...state,
+      workspace: {
+        ...state.workspace,
+        handle: createFakeHandle(),
+        name: "workspace",
+        permission: "granted",
+        reconnectRequired: false,
+        summary: 'Workspace "workspace" has 1 files.',
+        tree: [],
+      },
+    }));
+
+    await store.getState().sendPrompt("hi intro urself in hi.txt :)");
+
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.conversation).toEqual([
+      {
+        role: "user",
+        content: "hi intro urself in hi.txt :)",
+      },
+      {
+        role: "assistant",
+        content:
+          '[TOOL{"tool":"write_file","args":{"path":"hi.txt","content":"Hi! ..."}[END]',
+      },
+      {
+        role: "system",
+        content:
+          "Format error: The previous msg is malformed. Response must start with [TEXT], [TOOL], or [CONTINUE]. Try again.",
+      },
+    ]);
+  });
+
   it("deletes the active thread, clears its diff, and creates a replacement when needed", async () => {
     const database = new AppDatabase(`web-bro-test-${crypto.randomUUID()}`);
     const { runtime } = createMockRuntime({

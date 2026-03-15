@@ -467,9 +467,11 @@ export const SYSTEM_PROMPT = [
   "1. [TEXT]...[END]  - Talking only, no action taken",
   '2. [TOOL]{"tool":"name","args":{...}}[END] - Actually does something',
   "",
-  "NEVER use both [TEXT] and [TOOL] in one response.",
+  "ALWAYS start your answer with [TEXT] or [TOOL].",
   "NEVER explain what you will do in [TEXT] - just do it with [TOOL].",
   "TOOL RESPONSES MUST be valid JSON immediately after [TOOL] and MUST end with [END].",
+  "Be extremely careful to produce valid JSON with all braces and quotes closed.",
+  "Before finishing a [TOOL] response, ensure the JSON object is complete and exactly wrapped as [TOOL]{...}[END].",
   'Valid example: [TOOL]{"tool":"list_dir","args":{"path":"."}}[END]',
   "",
   "IF THE USER WANTS A FILE CREATED:",
@@ -537,7 +539,7 @@ export function renderGenerationPrompt(request: GenerateTurnRequest): string {
     ? request.agentNotes.join("\n")
     : "";
 
-  return `${prompt}<|im_start|>assistant\n<think>\n${thinkContent}\n</think>\n`;
+  return `${prompt}\n<|im_start|>assistant\n<think>\n${thinkContent}\n</think>\n`;
 }
 
 function normalizeDecision(raw: string): AgentDecision {

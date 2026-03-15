@@ -1060,6 +1060,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
 
           const toolResults: ToolResultContext[] = [];
           const agentNotes: string[] = [];
+          let retryMessages: ModelConversationMessage[] = [];
           const knownRevisions = new Map<string, string | null>();
           let accumulatedContent = ""; // For accumulating partial outputs
           const currentTag: "[TEXT]" | "[TOOL]" | null = null;
@@ -1088,7 +1089,10 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
 
             const logId = createId();
             const turnRequest: GenerateTurnRequest = {
-              conversation: toModelConversation(thread.messages),
+              conversation: [
+                ...toModelConversation(thread.messages),
+                ...retryMessages,
+              ],
               agentNotes,
               workspaceSummary: get().workspace.summary,
               partialOutput: accumulatedContent || undefined,
@@ -1168,6 +1172,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
                   "Your previous response was cut off. Continue using [CONTINUE]content[END] format.",
                 );
               }
+              retryMessages = [];
               continue;
             }
 
@@ -1181,9 +1186,45 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
                 );
                 return;
               }
-              agentNotes.push(
-                `Format error: ${decision.message}. You MUST start with [TEXT] or [TOOL] and end with [END]. Try again.`,
-              );
+              retryMessages = decision.raw
+                ? [
+                    {
+                      role: "assistant",
+                      content: decision.raw,
+                    },
+                    {
+                      role:
+                        decision.message ===
+                          "Tool call requested but no valid JSON found." ||
+                        decision.message ===
+                          "Tool call JSON could not be parsed."
+                          ? "tool"
+                          : "system",
+                      content:
+                        decision.message ===
+                          "Tool call requested but no valid JSON found." ||
+                        decision.message ===
+                          "Tool call JSON could not be parsed."
+                          ? `Format error: ${decision.message} Try again.`
+                          : `Format error: The previous msg is malformed. ${decision.message} Try again.`,
+                    },
+                  ]
+                : [
+                    {
+                      role: "system",
+                      content: `Format error: The previous msg is malformed. ${decision.message} Try again.`,
+                    },
+                  ];
+              agentNotes.length = 0;
+              if (
+                decision.message ===
+                  "Tool call requested but no valid JSON found." ||
+                decision.message === "Tool call JSON could not be parsed."
+              ) {
+                agentNotes.push(
+                  "Begin with [TOOL] in the answer, and end with [END].",
+                );
+              }
               continue;
             }
 
@@ -1191,6 +1232,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
             if (decision.type === "continue") {
               accumulatedContent += decision.content;
               // Keep looping - model will eventually finish or we hit maxLoops
+              retryMessages = [];
               continue;
             }
 
@@ -1208,6 +1250,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
               } else {
                 finalResponse = decision;
               }
+              retryMessages = [];
               break;
             }
 
@@ -1219,6 +1262,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
                 // Try to merge accumulated partial with current tool call
                 // This is a fallback - ideally the tool call is complete now
               }
+              retryMessages = [];
               // Proceed with tool execution below
             } else {
               break;
