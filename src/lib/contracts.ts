@@ -180,6 +180,7 @@ export interface ModelWorkerAPI {
   configureModelCache(
     directoryHandle: FileSystemDirectoryHandle | null,
   ): Promise<ModelCacheStatus>;
+  renderDebugPrompt(messages: ModelConversationMessage[]): Promise<string>;
   generateRawText(
     request: GenerateRawTextRequest,
     onStream?: StreamListener,

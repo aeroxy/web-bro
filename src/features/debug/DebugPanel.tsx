@@ -76,7 +76,10 @@ export function DebugPanel() {
                       aria-label={`Entry ${index + 1} role`}
                       className="input-shell w-auto pr-8"
                       onChange={(event) =>
-                        setDebugEntryRole(entry.id, event.target.value as typeof entry.role)
+                        setDebugEntryRole(
+                          entry.id,
+                          event.target.value as typeof entry.role,
+                        )
                       }
                       value={entry.role}
                     >
@@ -115,7 +118,7 @@ export function DebugPanel() {
               </button>
               <button
                 className="primary-button"
-                onClick={() => parseDebugPrompt()}
+                onClick={() => void parseDebugPrompt()}
                 type="button"
               >
                 Parse

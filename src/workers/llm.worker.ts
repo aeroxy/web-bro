@@ -6,7 +6,7 @@ import {
   TextStreamer,
 } from "@huggingface/transformers";
 import { expose } from "comlink";
-
+import { renderChatMl } from "../lib/chatml";
 import type {
   AgentDecision,
   AgentToolName,
@@ -20,7 +20,6 @@ import type {
   StreamChunk,
   StreamListener,
 } from "../lib/contracts";
-import { renderChatMl } from "../lib/chatml";
 import { extractFirstJsonObject } from "../lib/text";
 
 const MODEL_ID = "onnx-community/Qwen3.5-2B-ONNX";
@@ -62,6 +61,14 @@ let browserCachePromise: Promise<Cache | null> | null = null;
 
 function setStatus(next: ModelStatus): void {
   status = next;
+}
+
+function configureEnvironment(): void {
+  env.allowLocalModels = false;
+  env.allowRemoteModels = true;
+  env.useBrowserCache = false;
+  env.useCustomCache = true;
+  env.customCache = folderBackedCache;
 }
 
 function debugLog(message: string, meta?: unknown): void {
@@ -414,11 +421,7 @@ async function loadResources() {
     device: "webgpu",
     modelId: MODEL_ID,
   });
-  env.allowLocalModels = false;
-  env.allowRemoteModels = true;
-  env.useBrowserCache = false;
-  env.useCustomCache = true;
-  env.customCache = folderBackedCache;
+  configureEnvironment();
   modelCacheDownloadBytes = 0;
   activeCacheSource = null;
 
@@ -840,6 +843,15 @@ const llmApi: ModelWorkerAPI = {
       permission: modelCachePermission,
       source: activeCacheSource,
     };
+  },
+
+  async renderDebugPrompt(messages) {
+    configureEnvironment();
+    const tokenizer = await loadTokenizer();
+    return tokenizer.apply_chat_template(messages, {
+      add_generation_prompt: true,
+      tokenize: false,
+    }) as string;
   },
 
   async generateRawText(request, onStream) {

@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createAppStore } from "../app/store";
-import { renderStructuredDebugPrompt } from "../lib/chatml";
 import type {
   AgentDecision,
   GenerateRawTextRequest,
@@ -58,6 +57,7 @@ function createMockRuntime(initialFiles: Record<string, string>) {
   ];
   let decisionIndex = 0;
   const rawPrompts: string[] = [];
+  const renderedDebugPrompts: GenerateTurnRequest["conversation"][] = [];
   let modelCacheStatus: ModelCacheStatus = {
     configured: false,
     detail: "Browser cache only.",
@@ -145,6 +145,10 @@ function createMockRuntime(initialFiles: Record<string, string>) {
           return modelCacheStatus;
         },
       ),
+      renderDebugPrompt: vi.fn(async (messages) => {
+        renderedDebugPrompts.push(messages);
+        return "native debug prompt";
+      }),
       generateRawText: vi.fn(
         async (
           request: GenerateRawTextRequest,
@@ -242,7 +246,7 @@ function createMockRuntime(initialFiles: Record<string, string>) {
     },
   };
 
-  return { files, rawPrompts, runtime };
+  return { files, rawPrompts, renderedDebugPrompts, runtime };
 }
 
 describe("app store", () => {
@@ -1049,9 +1053,9 @@ describe("app store", () => {
     expect(deleteSpy).toHaveBeenCalledWith("active");
   });
 
-  it("serializes structured debug entries into raw ChatML", async () => {
+  it("renders structured debug entries with the tokenizer chat template", async () => {
     const database = new AppDatabase(`web-bro-test-${crypto.randomUUID()}`);
-    const { runtime } = createMockRuntime({});
+    const { renderedDebugPrompts, runtime } = createMockRuntime({});
     const store = createAppStore({
       capabilityReport: {
         hasDirectoryPicker: true,
@@ -1085,10 +1089,10 @@ describe("app store", () => {
 
     store.getState().setDebugEntryRole(secondEntryId, "user");
     store.getState().setDebugEntryContent(secondEntryId, "Hello");
-    store.getState().parseDebugPrompt();
+    await store.getState().parseDebugPrompt();
 
-    expect(store.getState().debug.prompt).toBe(
-      renderStructuredDebugPrompt([
+    expect(renderedDebugPrompts).toEqual([
+      [
         {
           role: "system",
           content: "You are terse.",
@@ -1097,8 +1101,9 @@ describe("app store", () => {
           role: "user",
           content: "Hello",
         },
-      ]),
-    );
+      ],
+    ]);
+    expect(store.getState().debug.prompt).toBe("native debug prompt");
     expect(store.getState().debug.mode).toBe("raw");
   });
 
@@ -1121,7 +1126,9 @@ describe("app store", () => {
     await store.getState().initialize();
     store
       .getState()
-      .setDebugPrompt("<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n");
+      .setDebugPrompt(
+        "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n",
+      );
 
     await store.getState().sendDebugPrompt();
 

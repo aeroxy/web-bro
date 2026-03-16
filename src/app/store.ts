@@ -6,6 +6,7 @@ import {
   type CapabilityReport,
   getCapabilityReport,
 } from "../lib/capabilities";
+import type { DebugPromptEntry } from "../lib/chatml";
 import type {
   AgentDecision,
   AgentFinalResponse,
@@ -28,10 +29,6 @@ import type {
   WorkspaceTreeNode,
 } from "../lib/contracts";
 import { type AppDatabase, db } from "../lib/db";
-import {
-  type DebugPromptEntry,
-  renderStructuredDebugPrompt,
-} from "../lib/chatml";
 import {
   pickModelCacheDirectory,
   pickWorkspaceDirectory,
@@ -113,7 +110,7 @@ export interface AppState {
   connectWorkspace(): Promise<void>;
   createThread(): Promise<void>;
   addDebugEntry(): void;
-  parseDebugPrompt(): void;
+  parseDebugPrompt(): Promise<void>;
   removeDebugEntry(entryId: string): void;
   sendDebugPrompt(): Promise<void>;
   setDebugEntryContent(entryId: string, content: string): void;
@@ -1096,15 +1093,40 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
         }));
       },
 
-      parseDebugPrompt() {
+      async parseDebugPrompt() {
         set((state) => ({
           debug: {
             ...state.debug,
             error: null,
-            mode: "raw",
-            prompt: renderStructuredDebugPrompt(state.debug.entries),
           },
         }));
+
+        try {
+          const prompt = await resolveRuntime().llm.renderDebugPrompt(
+            get().debug.entries.map((entry) => ({
+              role: entry.role,
+              content: entry.content,
+            })),
+          );
+
+          set((state) => ({
+            debug: {
+              ...state.debug,
+              mode: "raw",
+              prompt,
+            },
+          }));
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+
+          set((state) => ({
+            debug: {
+              ...state.debug,
+              error: message,
+            },
+          }));
+        }
       },
 
       clearDebugState() {
@@ -1161,7 +1183,10 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
             }));
           });
 
-          const result = await runtime.llm.generateRawText({ prompt }, onStream);
+          const result = await runtime.llm.generateRawText(
+            { prompt },
+            onStream,
+          );
           const currentStatus = await runtime.llm.getStatus();
 
           set((state) => ({
