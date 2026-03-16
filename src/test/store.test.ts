@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createAppStore } from "../app/store";
+import { renderStructuredDebugPrompt } from "../lib/chatml";
 import type {
   AgentDecision,
+  GenerateRawTextRequest,
+  GenerateRawTextResult,
   GenerateTurnRequest,
   GenerateTurnResult,
   ModelCacheStatus,
@@ -54,6 +57,7 @@ function createMockRuntime(initialFiles: Record<string, string>) {
     },
   ];
   let decisionIndex = 0;
+  const rawPrompts: string[] = [];
   let modelCacheStatus: ModelCacheStatus = {
     configured: false,
     detail: "Browser cache only.",
@@ -141,6 +145,22 @@ function createMockRuntime(initialFiles: Record<string, string>) {
           return modelCacheStatus;
         },
       ),
+      generateRawText: vi.fn(
+        async (
+          request: GenerateRawTextRequest,
+          onStream?: (chunk: { type: "text"; text: string }) => void,
+        ): Promise<GenerateRawTextResult> => {
+          rawPrompts.push(request.prompt);
+          onStream?.({
+            type: "text",
+            text: "raw stream",
+          });
+          return {
+            output: "raw stream",
+            prompt: request.prompt,
+          };
+        },
+      ),
       generateTurn: vi.fn(
         async (
           _request: GenerateTurnRequest,
@@ -222,7 +242,7 @@ function createMockRuntime(initialFiles: Record<string, string>) {
     },
   };
 
-  return { files, runtime };
+  return { files, rawPrompts, runtime };
 }
 
 describe("app store", () => {
@@ -1027,5 +1047,88 @@ describe("app store", () => {
 
     expect(store.getState().modelCache.configured).toBe(false);
     expect(deleteSpy).toHaveBeenCalledWith("active");
+  });
+
+  it("serializes structured debug entries into raw ChatML", async () => {
+    const database = new AppDatabase(`web-bro-test-${crypto.randomUUID()}`);
+    const { runtime } = createMockRuntime({});
+    const store = createAppStore({
+      capabilityReport: {
+        hasDirectoryPicker: true,
+        hasWebGPU: true,
+        isChromium: true,
+        isSecureContext: true,
+        reasons: [],
+        supported: true,
+      },
+      database,
+      runtime,
+    });
+
+    await store.getState().initialize();
+    const firstEntryId = store.getState().debug.entries[0]?.id;
+
+    if (!firstEntryId) {
+      throw new Error("Expected an initial debug entry.");
+    }
+
+    store.getState().setDebugMode("structured");
+    store.getState().setDebugEntryRole(firstEntryId, "system");
+    store.getState().setDebugEntryContent(firstEntryId, "You are terse.");
+    store.getState().addDebugEntry();
+
+    const secondEntryId = store.getState().debug.entries[1]?.id;
+
+    if (!secondEntryId) {
+      throw new Error("Expected a second debug entry.");
+    }
+
+    store.getState().setDebugEntryRole(secondEntryId, "user");
+    store.getState().setDebugEntryContent(secondEntryId, "Hello");
+    store.getState().parseDebugPrompt();
+
+    expect(store.getState().debug.prompt).toBe(
+      renderStructuredDebugPrompt([
+        {
+          role: "system",
+          content: "You are terse.",
+        },
+        {
+          role: "user",
+          content: "Hello",
+        },
+      ]),
+    );
+    expect(store.getState().debug.mode).toBe("raw");
+  });
+
+  it("sends the exact raw debug prompt and stores streamed output", async () => {
+    const database = new AppDatabase(`web-bro-test-${crypto.randomUUID()}`);
+    const { rawPrompts, runtime } = createMockRuntime({});
+    const store = createAppStore({
+      capabilityReport: {
+        hasDirectoryPicker: true,
+        hasWebGPU: true,
+        isChromium: true,
+        isSecureContext: true,
+        reasons: [],
+        supported: true,
+      },
+      database,
+      runtime,
+    });
+
+    await store.getState().initialize();
+    store
+      .getState()
+      .setDebugPrompt("<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n");
+
+    await store.getState().sendDebugPrompt();
+
+    expect(rawPrompts).toEqual([
+      "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n",
+    ]);
+    expect(store.getState().debug.output).toBe("raw stream");
+    expect(runtime.llm.generateTurn).not.toHaveBeenCalled();
   });
 });

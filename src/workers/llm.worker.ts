@@ -10,6 +10,7 @@ import { expose } from "comlink";
 import type {
   AgentDecision,
   AgentToolName,
+  GenerateRawTextResult,
   GenerateTurnRequest,
   GenerateTurnResult,
   ModelCacheSource,
@@ -19,6 +20,7 @@ import type {
   StreamChunk,
   StreamListener,
 } from "../lib/contracts";
+import { renderChatMl } from "../lib/chatml";
 import { extractFirstJsonObject } from "../lib/text";
 
 const MODEL_ID = "onnx-community/Qwen3.5-2B-ONNX";
@@ -504,14 +506,6 @@ function buildMessages(request: GenerateTurnRequest) {
   ];
 }
 
-function renderChatMl(messages: { role: string; content: string }[]): string {
-  return messages
-    .map(
-      (message) => `<|im_start|>${message.role}\n${message.content}<|im_end|>`,
-    )
-    .join("\n");
-}
-
 function renderOpenAssistantContinuation(content: string): string {
   return `<|im_start|>assistant\n${content}`;
 }
@@ -664,15 +658,10 @@ function normalizeDecision(
 }
 
 async function generateText(
-  request: GenerateTurnRequest,
+  prompt: string,
   onStream?: StreamListener,
 ): Promise<{ output: string; prompt: string }> {
-  debugLog("generate:start", {
-    agentNotes: request.agentNotes?.length ?? 0,
-    conversationMessages: request.conversation.length,
-  });
   const { tokenizer, model } = await loadResources();
-  const prompt = renderGenerationPrompt(request);
   const inputs = tokenizer(prompt, {
     return_tensor: true,
   });
@@ -853,8 +842,24 @@ const llmApi: ModelWorkerAPI = {
     };
   },
 
+  async generateRawText(request, onStream) {
+    debugLog("generate:raw-start", {
+      promptChars: request.prompt.length,
+    });
+    const { output, prompt } = await generateText(request.prompt, onStream);
+    return {
+      output,
+      prompt,
+    } satisfies GenerateRawTextResult;
+  },
+
   async generateTurn(request, onStream) {
-    const { output, prompt } = await generateText(request, onStream);
+    debugLog("generate:start", {
+      agentNotes: request.agentNotes?.length ?? 0,
+      conversationMessages: request.conversation.length,
+    });
+    const prompt = renderGenerationPrompt(request);
+    const { output } = await generateText(prompt, onStream);
     const decision = normalizeDecision(output, Boolean(request.partialOutput));
     return {
       decision,

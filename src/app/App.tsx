@@ -8,6 +8,7 @@ import {
 import { CapabilityGate } from "../components/CapabilityGate";
 import { ThreadSidebar } from "../components/ThreadSidebar";
 import { ChatPanel } from "../features/chat/ChatPanel";
+import { DebugPanel } from "../features/debug/DebugPanel";
 import { LogPanel } from "../features/log/LogPanel";
 import { WorkspacePanel } from "../features/workspace/WorkspacePanel";
 import { useAppStore } from "./store";
@@ -30,7 +31,7 @@ function LoadingShell() {
 }
 
 function RightPanel() {
-  const [tab, setTab] = useState<"workspace" | "log">("workspace");
+  const [tab, setTab] = useState<"workspace" | "log" | "debug">("workspace");
 
   return (
     <div className="panel-surface flex h-full flex-col">
@@ -58,10 +59,27 @@ function RightPanel() {
           >
             Log
           </button>
+          <button
+            className={`rounded-2xl px-3 py-2 text-sm transition ${
+              tab === "debug"
+                ? "bg-accent-500/12 text-accent-300"
+                : "text-slate-400 hover:bg-white/6"
+            }`}
+            onClick={() => setTab("debug")}
+            type="button"
+          >
+            Debug
+          </button>
         </div>
       </div>
       <div className="flex-1 overflow-hidden">
-        {tab === "workspace" ? <WorkspacePanel /> : <LogPanel />}
+        {tab === "workspace" ? (
+          <WorkspacePanel />
+        ) : tab === "log" ? (
+          <LogPanel />
+        ) : (
+          <DebugPanel />
+        )}
       </div>
     </div>
   );

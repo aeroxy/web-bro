@@ -29,6 +29,10 @@ import type {
 } from "../lib/contracts";
 import { type AppDatabase, db } from "../lib/db";
 import {
+  type DebugPromptEntry,
+  renderStructuredDebugPrompt,
+} from "../lib/chatml";
+import {
   pickModelCacheDirectory,
   pickWorkspaceDirectory,
 } from "../lib/directory-picker";
@@ -75,10 +79,20 @@ interface ModelCacheState extends ModelCacheStatus {
   reconnectRequired: boolean;
 }
 
+interface DebugState {
+  mode: "raw" | "structured";
+  output: string;
+  prompt: string;
+  running: boolean;
+  error: string | null;
+  entries: DebugPromptEntry[];
+}
+
 export interface AppState {
   agentActivity: string | null;
   capabilities: CapabilityReport;
   currentThreadId: string | null;
+  debug: DebugState;
   modelCache: ModelCacheState;
   clearModelCacheFolder(): Promise<void>;
   connectModelCacheFolder(): Promise<void>;
@@ -93,9 +107,19 @@ export interface AppState {
   updateLog(entry: LogEntry): void;
   clearLogs(): void;
   cancelAgentTurn(): Promise<void>;
+  cancelDebugPrompt(): Promise<void>;
   clearSearch(): void;
+  clearDebugState(): void;
   connectWorkspace(): Promise<void>;
   createThread(): Promise<void>;
+  addDebugEntry(): void;
+  parseDebugPrompt(): void;
+  removeDebugEntry(entryId: string): void;
+  sendDebugPrompt(): Promise<void>;
+  setDebugEntryContent(entryId: string, content: string): void;
+  setDebugEntryRole(entryId: string, role: DebugPromptEntry["role"]): void;
+  setDebugMode(mode: DebugState["mode"]): void;
+  setDebugPrompt(prompt: string): void;
   dismissDiff(): void;
   initialize(): Promise<void>;
   openFile(path: string): Promise<void>;
@@ -139,6 +163,26 @@ const initialModelCacheState: ModelCacheState = {
   permission: "unknown",
   reconnectRequired: false,
   source: null,
+};
+
+function createDebugEntry(
+  role: DebugPromptEntry["role"] = "user",
+  content = "",
+): DebugPromptEntry {
+  return {
+    id: createId(),
+    role,
+    content,
+  };
+}
+
+const initialDebugState: DebugState = {
+  entries: [createDebugEntry()],
+  error: null,
+  mode: "raw",
+  output: "",
+  prompt: "",
+  running: false,
 };
 
 function sortThreads(threads: ChatThread[]): ChatThread[] {
@@ -599,6 +643,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
       agentActivity: null,
       capabilities: resolveCapabilities(),
       currentThreadId: null,
+      debug: initialDebugState,
       hydrated: false,
       isBusy: false,
       modelCache: initialModelCacheState,
@@ -983,6 +1028,172 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
 
       clearLogs() {
         set({ logs: [] });
+      },
+
+      setDebugMode(mode) {
+        set((state) => ({
+          debug: {
+            ...state.debug,
+            error: null,
+            mode,
+          },
+        }));
+      },
+
+      setDebugPrompt(prompt) {
+        set((state) => ({
+          debug: {
+            ...state.debug,
+            error: null,
+            prompt,
+          },
+        }));
+      },
+
+      addDebugEntry() {
+        set((state) => ({
+          debug: {
+            ...state.debug,
+            entries: [...state.debug.entries, createDebugEntry()],
+          },
+        }));
+      },
+
+      removeDebugEntry(entryId) {
+        set((state) => {
+          const entries = state.debug.entries.filter(
+            (entry) => entry.id !== entryId,
+          );
+
+          return {
+            debug: {
+              ...state.debug,
+              entries: entries.length > 0 ? entries : [createDebugEntry()],
+            },
+          };
+        });
+      },
+
+      setDebugEntryRole(entryId, role) {
+        set((state) => ({
+          debug: {
+            ...state.debug,
+            entries: state.debug.entries.map((entry) =>
+              entry.id === entryId ? { ...entry, role } : entry,
+            ),
+          },
+        }));
+      },
+
+      setDebugEntryContent(entryId, content) {
+        set((state) => ({
+          debug: {
+            ...state.debug,
+            entries: state.debug.entries.map((entry) =>
+              entry.id === entryId ? { ...entry, content } : entry,
+            ),
+          },
+        }));
+      },
+
+      parseDebugPrompt() {
+        set((state) => ({
+          debug: {
+            ...state.debug,
+            error: null,
+            mode: "raw",
+            prompt: renderStructuredDebugPrompt(state.debug.entries),
+          },
+        }));
+      },
+
+      clearDebugState() {
+        set({
+          debug: {
+            ...initialDebugState,
+            entries: [createDebugEntry()],
+          },
+        });
+      },
+
+      async sendDebugPrompt() {
+        const prompt = get().debug.prompt;
+
+        if (!prompt.trim() || get().isBusy) {
+          return;
+        }
+
+        set((state) => ({
+          agentActivity: "Running debug prompt...",
+          debug: {
+            ...state.debug,
+            error: null,
+            output: "",
+            prompt,
+            running: true,
+          },
+          isBusy: true,
+        }));
+
+        try {
+          const runtime = resolveRuntime();
+          const modelStatus = await loadModelWithProgress(runtime);
+          set({
+            modelCache: {
+              ...get().modelCache,
+              ...(await runtime.llm.getModelCacheStatus()),
+              handle: get().modelCache.handle,
+              reconnectRequired: get().modelCache.permission !== "granted",
+            },
+            modelStatus,
+          });
+
+          const onStream = proxy((chunk: StreamChunk) => {
+            if (chunk.type !== "text") {
+              return;
+            }
+
+            set((state) => ({
+              debug: {
+                ...state.debug,
+                output: `${state.debug.output}${chunk.text}`,
+              },
+            }));
+          });
+
+          const result = await runtime.llm.generateRawText({ prompt }, onStream);
+          const currentStatus = await runtime.llm.getStatus();
+
+          set((state) => ({
+            debug: {
+              ...state.debug,
+              output: result.output,
+              running: false,
+            },
+            modelStatus: currentStatus,
+          }));
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+
+          set((state) => ({
+            debug: {
+              ...state.debug,
+              error: message,
+              running: false,
+            },
+            modelStatus: {
+              detail: "Debug prompt failed.",
+              error: message,
+              phase: "error",
+            },
+          }));
+        } finally {
+          set({
+            agentActivity: null,
+            isBusy: false,
+          });
+        }
       },
 
       async sendPrompt(prompt) {
@@ -1406,6 +1617,22 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
       async cancelAgentTurn() {
         set((state) => ({
           agentActivity: "Cancelling generation...",
+          modelStatus: {
+            ...state.modelStatus,
+            detail: "Cancelling generation...",
+          },
+        }));
+
+        await resolveRuntime().llm.abortGeneration();
+      },
+
+      async cancelDebugPrompt() {
+        set((state) => ({
+          agentActivity: "Cancelling debug generation...",
+          debug: {
+            ...state.debug,
+            running: false,
+          },
           modelStatus: {
             ...state.modelStatus,
             detail: "Cancelling generation...",

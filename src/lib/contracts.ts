@@ -139,6 +139,15 @@ export interface GenerateTurnResult {
   decision: AgentDecision;
 }
 
+export interface GenerateRawTextRequest {
+  prompt: string;
+}
+
+export interface GenerateRawTextResult {
+  prompt: string;
+  output: string;
+}
+
 export interface StreamChunk {
   type: "text";
   text: string;
@@ -171,6 +180,10 @@ export interface ModelWorkerAPI {
   configureModelCache(
     directoryHandle: FileSystemDirectoryHandle | null,
   ): Promise<ModelCacheStatus>;
+  generateRawText(
+    request: GenerateRawTextRequest,
+    onStream?: StreamListener,
+  ): Promise<GenerateRawTextResult>;
   generateTurn(
     request: GenerateTurnRequest,
     onStream?: StreamListener,
