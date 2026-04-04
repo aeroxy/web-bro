@@ -2,10 +2,10 @@
 
 ## Overview of this project
 
-Web Bro is a browser-only workspace agent built with transformer.js that runs Qwen 3.5 2B ONNX fully in the browser on WebGPU. It allows users to pick a local folder as a workspace using the File System Access API and provides a shallow tool loop for directory listing, text search, file reading, and writing. The agent writes directly into the selected workspace, snapshots previous contents in IndexedDB for undo functionality, and persists chat threads, workspace sessions, settings, and write backups locally.
+Web Bro is a browser-only workspace agent built with transformer.js that runs Gemma 4 E2B-it ONNX fully in the browser on WebGPU. It allows users to pick a local folder as a workspace using the File System Access API and provides a shallow tool loop for directory listing, text search, file reading, and writing. The agent writes directly into the selected workspace, snapshots previous contents in IndexedDB for undo functionality, and persists chat threads, workspace sessions, settings, and write backups locally.
 
 Key features include:
-- Runs Qwen 3.5 2B ONNX model entirely in-browser via WebGPU
+- Runs Gemma 4 E2B-it ONNX entirely in-browser via WebGPU
 - File System Access API for local folder workspace selection
 - Shallow tool loop with list_dir, search_text, read_file, write_file operations
 - Direct writing to workspace with snapshot-based undo functionality
@@ -31,7 +31,7 @@ This project includes detailed documentation in the `wiki/` folder for specific 
 ### Wiki Contents
 - **Architecture** (`architecture.md`) - Detailed explanation of the project architecture
 - **File System Access** (`file-system-access.md`) - How we use the File System Access API
-- **Model Loading** (`model-loading.md`) - Details about loading and running the Qwen model in the browser
+- **Model Loading** (`model-loading.md`) - Details about loading and running the Gemma model in the browser
 - **Tool Loop** (`tool-loop.md`) - Explanation of the shallow tool loop
 - **Persistence** (`persistence.md`) - How we persist data locally
 - **Undo Functionality** (`undo.md`) - How snapshot-based undo works

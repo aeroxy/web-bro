@@ -9,6 +9,7 @@
     "url": "https://github.com/aeroxy/web-bro.git"
   },
   "scripts": {
+    "start": "vite",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b",
@@ -22,7 +23,7 @@
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.2.7",
     "@fontsource/ibm-plex-sans": "^5.2.8",
-    "@huggingface/transformers": "4.0.0-next.6",
+    "@huggingface/transformers": "4.0.1",
     "@monaco-editor/react": "^4.7.0",
     "clsx": "^2.1.1",
     "comlink": "^4.4.2",

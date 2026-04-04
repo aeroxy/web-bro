@@ -37,7 +37,7 @@ function TreeNode({
   }
 
   return (
-    <details className="group" open>
+    <details className="group">
       <summary className="cursor-pointer list-none rounded-2xl px-3 py-2 text-sm text-slate-300 transition hover:bg-white/6">
         <span className="inline-flex items-center gap-2">
           <span className="font-mono text-xs text-slate-500">D</span>

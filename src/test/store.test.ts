@@ -16,7 +16,30 @@ import type {
 } from "../lib/contracts";
 import { AppDatabase } from "../lib/db";
 import type { RuntimeServices } from "../services/runtime";
-import { renderGenerationPrompt } from "../workers/llm.worker";
+import type { AutoProcessor } from "@huggingface/transformers";
+import {
+  normalizeDecision,
+  renderGenerationPrompt,
+} from "../workers/llm.worker";
+
+function createMockProcessor(): Awaited<
+  ReturnType<typeof AutoProcessor.from_pretrained>
+> {
+  return {
+    apply_chat_template(
+      messages: { role: string; content: unknown }[],
+      options: { add_generation_prompt?: boolean },
+    ): string {
+      const rendered = messages
+        .map((m) => `<start_of_turn>${m.role}\n${m.content}<end_of_turn>`)
+        .join("\n");
+      return options?.add_generation_prompt
+        ? `${rendered}\n<start_of_turn>model\n`
+        : rendered;
+    },
+    tokenizer: {},
+  } as unknown as Awaited<ReturnType<typeof AutoProcessor.from_pretrained>>;
+}
 
 function createFakeHandle(name = "workspace"): FileSystemDirectoryHandle {
   return {
@@ -178,7 +201,7 @@ function createMockRuntime(initialFiles: Record<string, string>) {
           return {
             decision: decisions[decisionIndex++] ?? fallback,
             prompt:
-              "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n",
+              "<bos><start_of_turn>developer\nmock<end_of_turn><start_of_turn>model\n",
           };
         },
       ),
@@ -485,7 +508,7 @@ describe("app store", () => {
             },
           },
           prompt:
-            "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n",
+            "<bos><start_of_turn>developer\nmock<end_of_turn><start_of_turn>model\n",
         };
       },
     );
@@ -569,7 +592,7 @@ describe("app store", () => {
               },
             },
             prompt:
-              "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n",
+              "<bos><start_of_turn>developer\nmock<end_of_turn><start_of_turn>model\n",
           };
         }
 
@@ -579,7 +602,7 @@ describe("app store", () => {
             message: "done",
           },
           prompt:
-            "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n",
+            "<bos><start_of_turn>developer\nmock<end_of_turn><start_of_turn>model\n",
         };
       },
     );
@@ -641,12 +664,20 @@ describe("app store", () => {
       },
       {
         role: "assistant",
-        content: '[TOOL:read_file]{"path":"src/app.ts"}[END]',
+        content: "",
+        tool_calls: [
+          {
+            name: "read_file",
+            arguments: {
+              path: "src/app.ts",
+            },
+          },
+        ],
       },
       {
         role: "tool",
         content:
-          "[Tool: read_file]\nStatus: SUCCESS\nSummary: Read src/app.ts.\nResult:\nsrc/app.ts\n\nexport const app = 'initial';\n",
+          '{"detail":"src/app.ts\\n\\nexport const app = \'initial\';\\n","ok":true,"summary":"Read src/app.ts."}',
       },
     ]);
   });
@@ -669,11 +700,12 @@ describe("app store", () => {
           return {
             decision: {
               type: "error",
-              message: "Tool call requested but no valid JSON found.",
-              raw: '[TOOL:write_file]{"path":"hi.txt","content":"Hi! ..."[END]',
+              message:
+                "Function call requested but no valid JSON object was found.",
+              raw: '<start_function_call>call:write_file{"path":"hi.txt","content":"Hi! ..."<end_function_call>',
             },
             prompt:
-              "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n",
+              "<bos><start_of_turn>developer\nmock<end_of_turn><start_of_turn>model\n",
           };
         }
 
@@ -683,7 +715,7 @@ describe("app store", () => {
             message: "done",
           },
           prompt:
-            "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n",
+            "<bos><start_of_turn>developer\nmock<end_of_turn><start_of_turn>model\n",
         };
       },
     );
@@ -726,12 +758,13 @@ describe("app store", () => {
       },
       {
         role: "assistant",
-        content: '[TOOL:write_file]{"path":"hi.txt","content":"Hi! ..."[END]',
+        content:
+          '<start_function_call>call:write_file{"path":"hi.txt","content":"Hi! ..."<end_function_call>',
       },
       {
-        role: "tool",
+        role: "system",
         content:
-          "Format error: Tool call requested but no valid JSON found. Try again.",
+          "Your previous response was invalid: Function call requested but no valid JSON object was found. Return either plain text or a valid tool call.",
       },
     ]);
   });
@@ -754,11 +787,11 @@ describe("app store", () => {
           return {
             decision: {
               type: "error",
-              message: "Response must start with [TEXT] or [TOOL:name].",
-              raw: '[TOOLwrite_file]{"path":"hi.txt","content":"Hi! ..."[END]',
+              message: "Unknown function call: write_filex.",
+              raw: '<start_function_call>call:write_filex{"path":"hi.txt","content":"Hi!"}<end_function_call>',
             },
             prompt:
-              "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n",
+              "<bos><start_of_turn>developer\nmock<end_of_turn><start_of_turn>model\n",
           };
         }
 
@@ -768,7 +801,7 @@ describe("app store", () => {
             message: "done",
           },
           prompt:
-            "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n",
+            "<bos><start_of_turn>developer\nmock<end_of_turn><start_of_turn>model\n",
         };
       },
     );
@@ -811,12 +844,13 @@ describe("app store", () => {
       },
       {
         role: "assistant",
-        content: '[TOOLwrite_file]{"path":"hi.txt","content":"Hi! ..."[END]',
+        content:
+          '<start_function_call>call:write_filex{"path":"hi.txt","content":"Hi!"}<end_function_call>',
       },
       {
         role: "system",
         content:
-          "Format error: The previous msg is malformed. Response must start with [TEXT] or [TOOL:name]. Try again.",
+          "Your previous response was invalid: Unknown function call: write_filex. Return either plain text or a valid tool call.",
       },
     ]);
   });
@@ -837,11 +871,12 @@ describe("app store", () => {
           return {
             decision: {
               type: "incomplete",
-              partial: '[TOOL:write_file]{"path":"poem.txt","content":"hello',
-              raw: '[TOOL:write_file]{"path":"poem.txt","content":"hello',
+              partial:
+                '<start_function_call>call:write_file{"path":"poem.txt","content":"hello',
+              raw: '<start_function_call>call:write_file{"path":"poem.txt","content":"hello',
             },
             prompt:
-              "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n",
+              "<bos><start_of_turn>developer\nmock<end_of_turn><start_of_turn>model\n",
           };
         }
 
@@ -853,10 +888,10 @@ describe("app store", () => {
               path: "poem.txt",
               content: "hello world",
             },
-            raw: ' world"}[END]',
+            raw: '<start_function_call>call:write_file{"path":"poem.txt","content":"hello world"}<end_function_call>',
           },
           prompt:
-            "<|im_start|>system\nmock\n<|im_end|>\n<|im_start|>assistant\n<think>\nI did not finish my last tool call. Continue the same [TOOL:name] response and only add [END] when the full tool call is complete.\n</think>\n",
+            '<bos><start_of_turn>developer\nmock<end_of_turn><start_of_turn>user\nwrite a poem in poem.txt for me<end_of_turn><start_of_turn>model\n<start_function_call>call:write_file{"path":"poem.txt","content":"hello',
         };
       },
     );
@@ -899,17 +934,21 @@ describe("app store", () => {
       },
       {
         role: "assistant",
-        content: '[TOOL:write_file]{"path":"poem.txt","content":"hello',
+        content:
+          '<start_function_call>call:write_file{"path":"poem.txt","content":"hello',
       },
     ]);
     expect(requests[1]?.partialOutput).toBe(
-      '[TOOL:write_file]{"path":"poem.txt","content":"hello',
+      '<start_function_call>call:write_file{"path":"poem.txt","content":"hello',
     );
     expect(files.get("poem.txt")?.content).toBe("hello world");
   });
 
-  it("omits continuation think prefill when partial output already exists", () => {
-    const prompt = renderGenerationPrompt({
+  it("continues Gemma partial output without reopening an assistant block", () => {
+    const partialOutput =
+      '<|tool_call>call:write_file{path:<|"|>poem.txt<|"|>content:<|"|>hello';
+    const processor = createMockProcessor();
+    const prompt = renderGenerationPrompt(processor, {
       conversation: [
         {
           role: "user",
@@ -917,23 +956,22 @@ describe("app store", () => {
         },
         {
           role: "assistant",
-          content: '[TOOL:write_file]{"path":"poem.txt","content":"hello',
+          content: partialOutput,
         },
       ],
       workspaceSummary: null,
-      agentNotes: [
-        "I did not finish my last tool call. Continue from where I left off.",
-      ],
-      partialOutput: '[TOOL:write_file]{"path":"poem.txt","content":"hello',
+      agentNotes: [],
+      partialOutput,
     });
 
-    expect(prompt).toContain(
-      '<|im_start|>assistant\n[TOOL:write_file]{"path":"poem.txt","content":"hello',
-    );
+    expect(prompt).toContain(partialOutput);
+    // Partial should be appended after the generation prompt, not closed in an assistant block
+    expect(prompt).not.toContain(`${partialOutput}<end_of_turn>`);
+    // The partial content from the last assistant message should not be rendered inside messages
+    // (it should only appear as a raw suffix after the generation prompt)
     expect(prompt).not.toContain(
-      '[TOOL:write_file]{"path":"poem.txt","content":"hello<|im_end|>',
+      `<start_of_turn>assistant\n${partialOutput}`,
     );
-    expect(prompt).not.toContain("<think>");
   });
 
   it("deletes the active thread, clears its diff, and creates a replacement when needed", async () => {
@@ -1053,7 +1091,7 @@ describe("app store", () => {
     expect(deleteSpy).toHaveBeenCalledWith("active");
   });
 
-  it("renders structured debug entries with the tokenizer chat template", async () => {
+  it("renders structured debug entries with the Gemma template", async () => {
     const database = new AppDatabase(`web-bro-test-${crypto.randomUUID()}`);
     const { renderedDebugPrompts, runtime } = createMockRuntime({});
     const store = createAppStore({
@@ -1127,15 +1165,74 @@ describe("app store", () => {
     store
       .getState()
       .setDebugPrompt(
-        "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n",
+        "<bos><start_of_turn>user\nHello<end_of_turn><start_of_turn>model\n",
       );
 
     await store.getState().sendDebugPrompt();
 
     expect(rawPrompts).toEqual([
-      "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n",
+      "<bos><start_of_turn>user\nHello<end_of_turn><start_of_turn>model\n",
     ]);
     expect(store.getState().debug.output).toBe("raw stream");
     expect(runtime.llm.generateTurn).not.toHaveBeenCalled();
+  });
+
+  it("parses a Gemma tool call", () => {
+    expect(
+      normalizeDecision(
+        '<|tool_call>call:read_file{path:<|"|>src/app.ts<|"|>}<tool_call|>',
+      ),
+    ).toEqual({
+      type: "tool",
+      tool: "read_file",
+      args: {
+        path: "src/app.ts",
+      },
+      raw: '<|tool_call>call:read_file{path:<|"|>src/app.ts<|"|>}<tool_call|>',
+    });
+  });
+
+  it("parses plain text as a final response", () => {
+    expect(normalizeDecision("done")).toEqual({
+      type: "final",
+      message: "done",
+      raw: "done",
+    });
+  });
+
+  it("returns incomplete for a truncated Gemma tool call", () => {
+    expect(
+      normalizeDecision(
+        '<|tool_call>call:write_file{path:<|"|>a.txt<|"|>',
+      ),
+    ).toEqual({
+      type: "incomplete",
+      partial: '<|tool_call>call:write_file{path:<|"|>a.txt<|"|>',
+      raw: '<|tool_call>call:write_file{path:<|"|>a.txt<|"|>',
+    });
+  });
+
+  it("rejects Gemma tool call with missing required arguments", () => {
+    expect(
+      normalizeDecision(
+        '<|tool_call>call:write_file{path:<|"|>a.txt<|"|>}<tool_call|>',
+      ),
+    ).toEqual({
+      type: "error",
+      message: "Function call arguments must be a JSON object.",
+      raw: '<|tool_call>call:write_file{path:<|"|>a.txt<|"|>}<tool_call|>',
+    });
+  });
+
+  it("rejects unknown Gemma function names", () => {
+    expect(
+      normalizeDecision(
+        '<|tool_call>call:unknown_tool{path:<|"|>a.txt<|"|>}<tool_call|>',
+      ),
+    ).toEqual({
+      type: "error",
+      message: "Unknown function call: unknown_tool.",
+      raw: '<|tool_call>call:unknown_tool{path:<|"|>a.txt<|"|>}<tool_call|>',
+    });
   });
 });

@@ -17,7 +17,7 @@ export function DebugPanel() {
   const clearDebugState = useAppStore((state) => state.clearDebugState);
 
   return (
-    <div className="panel-surface flex h-full flex-col">
+    <div className="flex h-full flex-col">
       <div className="panel-header">
         <div>
           <p className="panel-title">Debug</p>
@@ -136,8 +136,12 @@ export function DebugPanel() {
                 aria-label="Raw prompt"
                 className="input-shell min-h-[180px] flex-1 resize-y bg-transparent font-mono text-xs"
                 onChange={(event) => setDebugPrompt(event.target.value)}
-                placeholder="<|im_start|>user
-Hello<|im_end|>"
+                placeholder="<bos><|turn>system
+You are helpful.<turn|>
+<|turn>user
+Hello<turn|>
+<|turn>model
+"
                 value={debug.prompt}
               />
             </div>

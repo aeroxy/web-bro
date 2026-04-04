@@ -101,13 +101,13 @@ export function ThreadSidebar() {
 
         <div className="surface-muted rounded-[26px] px-4 py-4">
           <div className="flex items-center justify-between gap-3">
-            <div>
+            <div className="min-w-0">
               <p className="text-sm font-medium text-slate-200">Model</p>
-              <p className="mt-1 text-sm text-slate-500">
+              <p className="mt-1 truncate text-sm text-slate-500">
                 {modelStatus.detail}
               </p>
             </div>
-            <span className="pill">{modelStatus.phase}</span>
+            <span className="pill shrink-0">{modelStatus.phase}</span>
           </div>
 
           {modelStatus.phase === "loading" ? (
@@ -132,7 +132,7 @@ export function ThreadSidebar() {
           ) : null}
 
           <p className="mt-4 text-xs leading-6 text-slate-500">
-            Qwen 3.5 2B ONNX on WebGPU. Cache source:{" "}
+            Gemma 4 E2B-it ONNX on WebGPU. Cache source:{" "}
             {modelCache.source ?? "pending"}.
           </p>
 

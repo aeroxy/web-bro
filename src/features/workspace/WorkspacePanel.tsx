@@ -37,7 +37,7 @@ export function WorkspacePanel() {
 
   if (!workspace.name) {
     return (
-      <div className="panel-surface flex h-full flex-col items-center justify-center gap-5 px-8 text-center">
+      <div className="flex h-full flex-col items-center justify-center gap-5 px-8 text-center">
         <span className="pill">Workspace</span>
         <div className="space-y-2">
           <h2 className="text-2xl font-semibold text-accent-300">
@@ -60,7 +60,7 @@ export function WorkspacePanel() {
   }
 
   return (
-    <div className="panel-surface flex h-full flex-col">
+    <div className="flex h-full flex-col">
       <div className="panel-header">
         <div>
           <p className="panel-title">Workspace</p>
@@ -77,7 +77,7 @@ export function WorkspacePanel() {
         </button>
       </div>
 
-      <div className="grid min-h-0 flex-1 grid-rows-[auto_auto_minmax(13rem,1fr)_minmax(18rem,1fr)] gap-4 px-5 py-4">
+      <div className="subtle-scrollbar grid min-h-0 flex-1 grid-rows-[auto_auto_minmax(13rem,1fr)_minmax(18rem,1fr)] gap-4 overflow-y-auto px-5 py-4">
         <div className="surface-muted rounded-[26px] px-4 py-4">
           <p className="text-sm leading-6 text-slate-300">
             {workspace.summary ?? "Workspace ready."}

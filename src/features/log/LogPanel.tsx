@@ -186,7 +186,7 @@ export function LogPanel() {
   const clearLogs = useAppStore((state) => state.clearLogs);
 
   return (
-    <div className="panel-surface flex h-full flex-col">
+    <div className="flex h-full flex-col">
       <div className="panel-header">
         <div>
           <p className="panel-title">Log</p>

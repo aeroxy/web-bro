@@ -12,8 +12,8 @@ Web Bro follows a worker-based architecture with a central orchestrator managing
 - Agent loop orchestration
 
 ### LLM Worker (`src/workers/llm.worker.ts`)
-- Qwen model loading and initialization
-- Decision pass for determining tool usage
+- Gemma 4 E2B-it model loading and initialization via `Gemma4ForCausalLM`
+- Native tool calling via `apply_chat_template({ tools })`
 - Streamed answer pass for generating responses
 - Cancellation support for long-running operations
 

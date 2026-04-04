@@ -1,12 +1,15 @@
 import {
-  AutoTokenizer,
-  env,
+  AutoProcessor,
+  Gemma4ForCausalLM,
   InterruptableStoppingCriteria,
-  Qwen3_5ForConditionalGeneration,
   TextStreamer,
+  env,
 } from "@huggingface/transformers";
 import { expose } from "comlink";
-import { renderChatMl } from "../lib/chatml";
+import {
+  renderStructuredDebugPrompt,
+  renderToolDefinition,
+} from "../lib/chatml";
 import type {
   AgentDecision,
   AgentToolName,
@@ -15,38 +18,44 @@ import type {
   GenerateTurnResult,
   ModelCacheSource,
   ModelCacheStatus,
+  ModelConversationMessage,
   ModelStatus,
+  ModelToolCall,
   ModelWorkerAPI,
   StreamChunk,
   StreamListener,
 } from "../lib/contracts";
-import { extractFirstJsonObject } from "../lib/text";
 
-const MODEL_ID = "onnx-community/Qwen3.5-2B-ONNX";
+const MODEL_ID = "onnx-community/gemma-4-E2B-it-ONNX";
 const DEBUG_PREFIX = "[Web Bro][LLM]";
 const interruptCriteria = new InterruptableStoppingCriteria();
 const TOKENIZER_PROGRESS_SHARE = 0.12;
 const FOLDER_PREFIX = "huggingface.co";
 const MODEL_FILES = [
+  "chat_template.jinja",
   "config.json",
   "generation_config.json",
+  "processor_config.json",
+  "preprocessor_config.json",
   "tokenizer.json",
   "tokenizer_config.json",
-  "preprocessor_config.json",
-  "processor_config.json",
-  "onnx/decoder_model_merged_q4.onnx",
-  "onnx/decoder_model_merged_q4.onnx_data",
-  "onnx/embed_tokens_q4.onnx",
-  "onnx/embed_tokens_q4.onnx_data",
-  "onnx/vision_encoder_q4.onnx",
-  "onnx/vision_encoder_q4.onnx_data",
+  "onnx/decoder_model_merged_q4f16.onnx",
+  "onnx/decoder_model_merged_q4f16.onnx_data",
+  "onnx/embed_tokens_q4f16.onnx",
+  "onnx/embed_tokens_q4f16.onnx_data",
 ] as const;
+const VALID_TOOLS: AgentToolName[] = [
+  "list_dir",
+  "read_file",
+  "search_text",
+  "write_file",
+];
 
-let tokenizerPromise: Promise<
-  Awaited<ReturnType<typeof AutoTokenizer.from_pretrained>>
+let processorPromise: Promise<
+  Awaited<ReturnType<typeof AutoProcessor.from_pretrained>>
 > | null = null;
 let modelPromise: Promise<
-  Awaited<ReturnType<typeof Qwen3_5ForConditionalGeneration.from_pretrained>>
+  Awaited<ReturnType<typeof Gemma4ForCausalLM.from_pretrained>>
 > | null = null;
 let status: ModelStatus = {
   phase: "idle",
@@ -58,6 +67,13 @@ let modelCacheFolder: FileSystemDirectoryHandle | null = null;
 let modelCachePermission: PermissionState | "unknown" = "unknown";
 let modelCacheDownloadBytes = 0;
 let browserCachePromise: Promise<Cache | null> | null = null;
+
+type LoadingProgressEvent = {
+  file?: string;
+  progress?: number;
+  status?: string;
+};
+
 
 function setStatus(next: ModelStatus): void {
   status = next;
@@ -89,15 +105,9 @@ function resetLoadingDebugState(): void {
 }
 
 function resetLoadedModel(): void {
-  tokenizerPromise = null;
+  processorPromise = null;
   modelPromise = null;
 }
-
-type LoadingProgressEvent = {
-  file?: string;
-  progress?: number;
-  status?: string;
-};
 
 function clampProgress(progress: number): number {
   return Math.max(0, Math.min(100, progress));
@@ -135,7 +145,7 @@ function updateLoadingStatus(
       : [TOKENIZER_PROGRESS_SHARE * 100, 100];
   const label =
     stage === "tokenizer"
-      ? "Preparing tokenizer assets"
+      ? "Preparing processor assets"
       : activeCacheSource === "folder"
         ? "Loading model weights from folder"
         : "Downloading model weights";
@@ -298,16 +308,32 @@ async function isManifestComplete(): Promise<boolean> {
     return false;
   }
 
+  let foundDecoder = false;
+  let foundEmbedTokens = false;
+
   for (const file of MODEL_FILES) {
     const relativePath = `${MODEL_ID}/resolve/main/${file}`;
     const resolved = await readFolderFile(`${FOLDER_PREFIX}/${relativePath}`);
 
     if (!resolved) {
+      if (
+        file === "onnx/decoder_model_merged_q4f16.onnx_data" ||
+        file === "onnx/embed_tokens_q4f16.onnx_data"
+      ) {
+        continue;
+      }
       return false;
+    }
+
+    if (file === "onnx/decoder_model_merged_q4f16.onnx_data") {
+      foundDecoder = true;
+    }
+    if (file === "onnx/embed_tokens_q4f16.onnx_data") {
+      foundEmbedTokens = true;
     }
   }
 
-  return true;
+  return foundDecoder && foundEmbedTokens;
 }
 
 function buildCacheStatus(detail = "Browser cache only."): ModelCacheStatus {
@@ -380,31 +406,27 @@ const folderBackedCache = {
   },
 };
 
-function loadTokenizer() {
-  if (!tokenizerPromise) {
-    tokenizerPromise = AutoTokenizer.from_pretrained(MODEL_ID, {
-      progress_callback(info) {
+function loadProcessor() {
+  if (!processorPromise) {
+    processorPromise = AutoProcessor.from_pretrained(MODEL_ID, {
+      progress_callback(info: unknown) {
         updateLoadingStatus("tokenizer", info as LoadingProgressEvent);
       },
     }).catch((error) => {
-      tokenizerPromise = null;
+      processorPromise = null;
       throw error;
     });
   }
 
-  return tokenizerPromise;
+  return processorPromise;
 }
 
 function loadModel() {
   if (!modelPromise) {
-    modelPromise = Qwen3_5ForConditionalGeneration.from_pretrained(MODEL_ID, {
+    modelPromise = Gemma4ForCausalLM.from_pretrained(MODEL_ID, {
       device: "webgpu",
-      dtype: {
-        decoder_model_merged: "q4",
-        embed_tokens: "q4",
-        vision_encoder: "q4",
-      },
-      progress_callback(info) {
+      dtype: "q4f16",
+      progress_callback(info: unknown) {
         updateLoadingStatus("model", info as LoadingProgressEvent);
       },
     }).catch((error) => {
@@ -425,12 +447,12 @@ async function loadResources() {
   modelCacheDownloadBytes = 0;
   activeCacheSource = null;
 
-  const tokenizer = await loadTokenizer();
-  debugLog("tokenizer:ready");
+  const processor = await loadProcessor();
+  debugLog("processor:ready");
 
   setStatus({
     phase: "loading",
-    detail: "Tokenizer ready. Preparing model weights.",
+    detail: "Processor ready. Preparing model weights.",
     progress: TOKENIZER_PROGRESS_SHARE * 100,
   });
 
@@ -440,117 +462,269 @@ async function loadResources() {
     phase: "ready",
     detail:
       activeCacheSource === "folder"
-        ? "Model ready on WebGPU from local folder cache."
+        ? "Gemma model ready on WebGPU from local folder cache."
         : activeCacheSource === "browser-cache"
-          ? "Model ready on WebGPU from browser cache."
-          : "Model ready on WebGPU.",
+          ? "Gemma model ready on WebGPU from browser cache."
+          : "Gemma model ready on WebGPU.",
     progress: 100,
   });
 
-  return { tokenizer, model };
+  return { processor, model };
 }
 
 function buildSystemContext(request: GenerateTurnRequest): string | null {
-  const sections = [
-    request.workspaceSummary
-      ? ["CURRENT WORKSPACE CONTEXT:", request.workspaceSummary].join("\n")
-      : null,
-  ].filter((section): section is string => Boolean(section));
-
-  if (sections.length === 0) {
+  if (!request.workspaceSummary) {
     return null;
   }
 
-  return sections.join("\n\n");
+  return ["CURRENT WORKSPACE CONTEXT:", request.workspaceSummary].join("\n");
 }
 
 export const SYSTEM_PROMPT = [
   "You are Web Bro, a workspace agent running fully inside a Chromium browser.",
   "",
-  "CRITICAL: YOU HAVE TOOLS. YOU CAN WRITE FILES. USE THEM.",
-  "",
-  "YOUR RESPONSE MUST USE EXACTLY ONE TAG:",
-  "1. [TEXT]...[END]  - Talking only, no action taken",
-  "2. [TOOL:name]{...}[END] - Actually does something",
-  "",
-  "ALWAYS start your answer with [TEXT] or [TOOL:name].",
-  "NEVER explain what you will do in [TEXT] - just do it with [TOOL:name].",
-  "TOOL RESPONSES MUST put the tool name in the tag and the args JSON immediately after it.",
-  "Be extremely careful to produce valid JSON with all braces and quotes closed.",
-  "Before finishing a [TOOL] response, ensure the JSON object is complete and exactly wrapped as [TOOL:name]{...}[END].",
-  "[END] means the response is fully complete. If you are still writing the same [TEXT] or [TOOL:name] response, do not output [END] yet.",
-  'Valid example: [TOOL:list_dir]{"path":"."}[END]',
-  "",
-  "IF THE USER WANTS A FILE CREATED:",
-  "- Use ONLY [TOOL:write_file]{...}[END]. Do NOT use [TEXT] first.",
-  "- Writing in [TEXT] does NOT create a file.",
-  "",
-  "YOUR TOOLS:",
-  'list_dir:{"path":"."}',
-  'read_file:{"path":string}',
-  'search_text:{"query":string}',
-  'write_file:{"path":string,"content":string}',
-  "",
-  "Use exactly one of those tool names in the [TOOL:name] tag.",
+  "Use the available functions when they are needed to inspect or modify the mounted workspace.",
+  "If no function is needed, answer in normal plain text.",
+  "Do not invent file contents, tool arguments, or workspace state that you have not inspected unless the user explicitly asked you to create them.",
 ].join("\n");
 
-export function getSystemPrompt(request: GenerateTurnRequest): string {
-  const context = buildSystemContext(request);
-  return context ? `${SYSTEM_PROMPT}\n\n${context}` : SYSTEM_PROMPT;
+function buildToolDefinitions() {
+  return [
+    renderToolDefinition({
+      name: "list_dir",
+      description: "List files and directories under a workspace path.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description:
+              "Workspace-relative directory path. Use . for the root.",
+          },
+        },
+      },
+    }),
+    renderToolDefinition({
+      name: "read_file",
+      description: "Read a UTF-8 text file from the workspace.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Workspace-relative file path to read.",
+          },
+        },
+        required: ["path"],
+      },
+    }),
+    renderToolDefinition({
+      name: "search_text",
+      description: "Search the workspace for a text query.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "Text query to search for.",
+          },
+        },
+        required: ["query"],
+      },
+    }),
+    renderToolDefinition({
+      name: "write_file",
+      description:
+        "Write a UTF-8 text file in the workspace, replacing the file if it already exists.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Workspace-relative file path to write.",
+          },
+          content: {
+            type: "string",
+            description: "Complete UTF-8 file contents to write.",
+          },
+        },
+        required: ["path", "content"],
+      },
+    }),
+  ];
 }
 
-function buildMessages(request: GenerateTurnRequest) {
+export function getSystemPrompt(request: GenerateTurnRequest): string {
+  const sections = [SYSTEM_PROMPT];
+  const context = buildSystemContext(request);
+
+  if (context) {
+    sections.push(context);
+  }
+
+  return sections.join("\n\n");
+}
+
+function buildMessages(
+  request: GenerateTurnRequest,
+): ModelConversationMessage[] {
   return [
     {
-      role: "system" as const,
+      role: "system",
       content: getSystemPrompt(request),
     },
     ...request.conversation,
   ];
 }
 
-function renderOpenAssistantContinuation(content: string): string {
-  return `<|im_start|>assistant\n${content}`;
+// Gemma's apply_chat_template expects tool_calls in { function: { name, arguments } } shape
+function toGemmaMessages(messages: ModelConversationMessage[]) {
+  return messages.map((msg) => {
+    if (msg.role === "assistant" && msg.tool_calls?.length) {
+      return {
+        ...msg,
+        tool_calls: msg.tool_calls.map((tc) => ({
+          function: { name: tc.name, arguments: tc.arguments },
+        })),
+      };
+    }
+    return msg;
+  });
 }
 
-export function renderGenerationPrompt(request: GenerateTurnRequest): string {
-  if (request.partialOutput) {
-    const messages = buildMessages(request);
-    const lastMessage = messages.at(-1);
+export function renderGenerationPrompt(
+  processor: Awaited<ReturnType<typeof AutoProcessor.from_pretrained>>,
+  request: GenerateTurnRequest,
+): string {
+  const messages = buildMessages(request);
+  const tools = buildToolDefinitions();
 
+  if (request.partialOutput) {
+    const lastMessage = messages.at(-1);
     if (
       lastMessage?.role === "assistant" &&
       lastMessage.content === request.partialOutput
     ) {
-      const prefix = messages.slice(0, -1);
-      const serializedPrefix =
-        prefix.length > 0 ? `${renderChatMl(prefix)}\n` : "";
-      return `${serializedPrefix}${renderOpenAssistantContinuation(lastMessage.content)}`;
+      const withoutLast = messages.slice(0, -1);
+      const base = processor.apply_chat_template(
+        toGemmaMessages(withoutLast),
+        {
+          tools,
+          add_generation_prompt: true,
+          tokenize: false,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          enable_thinking: false,
+        } as any,
+      ) as string;
+      return base + request.partialOutput;
     }
   }
 
-  const prompt = renderChatMl(buildMessages(request));
-  const thinkContent = request.agentNotes?.length
-    ? request.agentNotes.join("\n")
-    : "";
-
-  return `${prompt}\n<|im_start|>assistant\n<think>\n${thinkContent}\n</think>\n`;
+  return processor.apply_chat_template(toGemmaMessages(messages), {
+    tools,
+    add_generation_prompt: true,
+    tokenize: false,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    enable_thinking: false,
+  } as any) as string;
 }
 
-function repairJson(str: string): string {
-  let repaired = str;
-  const open = (repaired.match(/{/g) || []).length;
-  let close = (repaired.match(/}/g) || []).length;
+function parseGemmaToolCallArgs(
+  argsStr: string,
+): Record<string, unknown> | null {
+  // Gemma 4 tool call args format: {key:<|"|>value<|"|>,key2:123}
+  // The <|"|> tokens are decoded as literal strings by the tokenizer.
+  // We parse the brace-enclosed key-value pairs.
+  const result: Record<string, unknown> = {};
 
-  while (close < open) {
-    repaired += "}";
-    close += 1;
+  // Strip outer braces
+  const inner = argsStr.trim().replace(/^\{|\}$/g, "").trim();
+  if (!inner) {
+    return result;
   }
 
-  return repaired;
+  // Tokenize by splitting on commas that are not inside string tokens
+  // Strings are wrapped with <|"|>...<|"|>
+  const STRING_TOKEN = '<|"|>';
+  let i = 0;
+  const pairs: string[] = [];
+  let currentPair = "";
+
+  while (i < inner.length) {
+    // Check for string token start
+    if (inner.startsWith(STRING_TOKEN, i)) {
+      const start = i + STRING_TOKEN.length;
+      const end = inner.indexOf(STRING_TOKEN, start);
+      if (end === -1) {
+        return null; // malformed
+      }
+      currentPair += inner.slice(i, end + STRING_TOKEN.length);
+      i = end + STRING_TOKEN.length;
+    } else if (inner[i] === ",") {
+      pairs.push(currentPair.trim());
+      currentPair = "";
+      i++;
+    } else {
+      currentPair += inner[i];
+      i++;
+    }
+  }
+  if (currentPair.trim()) {
+    pairs.push(currentPair.trim());
+  }
+
+  for (const pair of pairs) {
+    const colonIdx = pair.indexOf(":");
+    if (colonIdx === -1) continue;
+    const key = pair.slice(0, colonIdx).trim();
+    const rawVal = pair.slice(colonIdx + 1).trim();
+
+    if (rawVal.startsWith(STRING_TOKEN) && rawVal.endsWith(STRING_TOKEN)) {
+      result[key] = rawVal.slice(STRING_TOKEN.length, -STRING_TOKEN.length);
+    } else if (rawVal === "true") {
+      result[key] = true;
+    } else if (rawVal === "false") {
+      result[key] = false;
+    } else if (rawVal === "null") {
+      result[key] = null;
+    } else {
+      const num = Number(rawVal);
+      result[key] = isNaN(num) ? rawVal : num;
+    }
+  }
+
+  return result;
 }
 
-function normalizeDecision(
+function parseGemmaToolCallPayload(
+  funcName: string,
+  argsStr: string,
+): ModelToolCall | AgentDecision {
+  const args = parseGemmaToolCallArgs(argsStr);
+
+  if (!args) {
+    return {
+      type: "error",
+      message: "Function call arguments could not be parsed.",
+      raw: `<|tool_call>call:${funcName}{${argsStr}}<tool_call|>`,
+    };
+  }
+
+  if (!VALID_TOOLS.includes(funcName as AgentToolName)) {
+    return {
+      type: "error",
+      message: `Unknown function call: ${funcName}.`,
+      raw: `<|tool_call>call:${funcName}{${argsStr}}<tool_call|>`,
+    };
+  }
+
+  return {
+    name: funcName as AgentToolName,
+    arguments: args,
+  };
+}
+
+export function normalizeDecision(
   raw: string,
   allowBareContinuation = false,
 ): AgentDecision {
@@ -558,104 +732,128 @@ function normalizeDecision(
     preview: previewText(raw),
   });
 
-  const trimmed = raw.trim();
-  const hasEndTag = trimmed.endsWith("[END]");
-  const content = hasEndTag ? trimmed.slice(0, -5).trimEnd() : trimmed;
+  // Strip trailing special tokens that appear with skip_special_tokens: false
+  const trimmed = raw
+    .replace(/<\|tool_response>$/g, "")
+    .replace(/<turn\|>$/g, "")
+    .replace(/<end_of_turn>$/g, "")
+    .replace(/<eos>$/g, "")
+    .trim();
 
-  const toolTagMatch = content.match(/^\[TOOL:([a-z_]+)\]/);
+  // Match complete Gemma 4 tool call: <|tool_call>call:func_name{args}<tool_call|>
+  const completeToolCallMatch = trimmed.match(
+    /^<\|tool_call>call:([A-Za-z_][A-Za-z0-9_]*)\{([\s\S]*?)\}<tool_call\|>$/,
+  );
 
-  if (allowBareContinuation && !content.startsWith("[TEXT]") && !toolTagMatch) {
-    if (hasEndTag) {
+  if (completeToolCallMatch) {
+    const funcName = completeToolCallMatch[1] ?? "";
+    const argsStr = completeToolCallMatch[2] ?? "";
+    const payload = parseGemmaToolCallPayload(funcName, argsStr);
+
+    if ("type" in payload) {
       return {
-        type: "final",
-        message: content || "Done.",
+        ...payload,
         raw,
       };
     }
 
-    return {
-      type: "incomplete",
-      partial: content,
-      raw,
-    };
-  }
-
-  if (!content.startsWith("[TEXT]") && !toolTagMatch) {
-    debugLog("decide:invalid-format", { preview: previewText(content) });
-    return {
-      type: "error",
-      message: "Response must start with [TEXT] or [TOOL:name].",
-      raw,
-    };
-  }
-
-  // Handle [TOOL:name] tag
-  if (toolTagMatch) {
-    const tool = toolTagMatch[1] as AgentToolName;
-    const afterTag = content.slice(toolTagMatch[0].length).trim();
-
-    if (!hasEndTag) {
-      debugLog("decide:tool-incomplete");
-      return {
-        type: "incomplete",
-        partial: content,
-        raw,
-      };
-    }
-
-    const repaired = repairJson(afterTag);
-    const candidate = extractFirstJsonObject(repaired) ?? repaired;
-
-    if (!candidate.trim()) {
-      return {
-        type: "error",
-        message: "Tool call requested but no valid JSON found.",
-        raw,
-      };
-    }
-
-    try {
-      const args = JSON.parse(candidate);
-
-      if (args && typeof args === "object" && !Array.isArray(args)) {
-        debugLog("decide:tool-parsed", {
-          tool,
-        });
+    debugLog("decide:tool-parsed", { tool: payload.name });
+    switch (payload.name) {
+      case "list_dir":
         return {
           type: "tool",
-          tool,
-          args,
+          tool: "list_dir",
+          args: payload.arguments,
+          raw,
+        };
+      case "read_file": {
+        const readPath = payload.arguments.path;
+        if (typeof readPath !== "string") {
+          return {
+            type: "error",
+            message: "Function call arguments must be a JSON object.",
+            raw,
+          };
+        }
+        return {
+          type: "tool",
+          tool: "read_file",
+          args: { path: readPath },
           raw,
         };
       }
-    } catch {
-      debugLog("decide:tool-parse-error");
+      case "search_text": {
+        const searchQuery = payload.arguments.query;
+        if (typeof searchQuery !== "string") {
+          return {
+            type: "error",
+            message: "Function call arguments must be a JSON object.",
+            raw,
+          };
+        }
+        return {
+          type: "tool",
+          tool: "search_text",
+          args: { query: searchQuery },
+          raw,
+        };
+      }
+      case "write_file": {
+        const writePath = payload.arguments.path;
+        const writeContent = payload.arguments.content;
+        if (typeof writePath !== "string" || typeof writeContent !== "string") {
+          return {
+            type: "error",
+            message: "Function call arguments must be a JSON object.",
+            raw,
+          };
+        }
+        return {
+          type: "tool",
+          tool: "write_file",
+          args: { path: writePath, content: writeContent },
+          raw,
+        };
+      }
+    }
+  }
+
+  // Incomplete tool call — opening token present but no closing token yet
+  if (trimmed.startsWith("<|tool_call>")) {
+    if (trimmed.includes("<tool_call|>")) {
+      return {
+        type: "error",
+        message: "Function call arguments could not be parsed.",
+        raw,
+      };
     }
 
     return {
-      type: "error",
-      message: "Tool call JSON could not be parsed.",
+      type: "incomplete",
+      partial: trimmed,
       raw,
     };
   }
 
-  // Handle [TEXT] tag
-  const afterTag = content.slice("[TEXT]".length).trim();
-  if (!hasEndTag) {
-    debugLog("decide:text-incomplete");
+  if (allowBareContinuation && trimmed) {
+    return {
+      type: "final",
+      message: trimmed,
+      raw,
+    };
+  }
+
+  if (!trimmed) {
     return {
       type: "incomplete",
-      partial: content,
+      partial: trimmed,
       raw,
     };
   }
 
-  debugLog("decide:text-parsed", {
-    message: previewText(afterTag),
-  });
   return {
     type: "final",
-    message: afterTag || "Done.",
+    message: trimmed,
     raw,
   };
 }
@@ -664,8 +862,9 @@ async function generateText(
   prompt: string,
   onStream?: StreamListener,
 ): Promise<{ output: string; prompt: string }> {
-  const { tokenizer, model } = await loadResources();
-  const inputs = tokenizer(prompt, {
+  const { processor, model } = await loadResources();
+  const inputs = processor.tokenizer!(prompt, {
+    add_special_tokens: false,
     return_tensor: true,
   });
   const promptTokens = inputs.input_ids.dims.at(-1) ?? 0;
@@ -685,7 +884,7 @@ async function generateText(
   const streamer =
     onStream === undefined
       ? undefined
-      : new TextStreamer(tokenizer, {
+      : new TextStreamer(processor.tokenizer!, {
           callback_function(text) {
             streamed += text;
             onStream({
@@ -694,7 +893,7 @@ async function generateText(
             } satisfies StreamChunk);
           },
           skip_prompt: true,
-          skip_special_tokens: true,
+          skip_special_tokens: false,
         });
 
   try {
@@ -702,10 +901,11 @@ async function generateText(
       ...inputs,
       do_sample: false,
       max_new_tokens: 1024,
-      repetition_penalty: 1.05,
+      temperature: 1.0,
+      top_p: 0.95,
+      top_k: 64,
       stopping_criteria: [interruptCriteria],
       streamer,
-      temperature: 0.15,
     });
 
     if (interruptCriteria.interrupted) {
@@ -713,12 +913,9 @@ async function generateText(
     }
 
     if (streamed.trim()) {
-      debugLog("generate:stream-complete", {
-        characters: streamed.trim().length,
-      });
       setStatus({
         phase: "ready",
-        detail: "Model ready on WebGPU.",
+        detail: "Gemma model ready on WebGPU.",
         progress: 100,
       });
       return {
@@ -737,18 +934,17 @@ async function generateText(
             }
           ).sequences;
     const decoded =
-      tokenizer.batch_decode(sequences.slice(null, [promptLength, null]), {
-        skip_special_tokens: true,
-      })[0] ?? "";
+      processor.tokenizer!.batch_decode(
+        sequences.slice(null, [promptLength, null]),
+        {
+          skip_special_tokens: false,
+        },
+      )[0] ?? "";
 
     setStatus({
       phase: "ready",
-      detail: "Model ready on WebGPU.",
+      detail: "Gemma model ready on WebGPU.",
       progress: 100,
-    });
-
-    debugLog("generate:complete", {
-      characters: decoded.trim().length,
     });
 
     return {
@@ -757,7 +953,6 @@ async function generateText(
     };
   } catch (error) {
     if (error instanceof Error && error.message === "Generation interrupted.") {
-      debugLog("generate:interrupted");
       setStatus({
         phase: "ready",
         detail: "Generation cancelled.",
@@ -772,9 +967,6 @@ async function generateText(
       error: error instanceof Error ? error.message : String(error),
       progress: undefined,
     });
-    debugLog("generate:error", {
-      error: error instanceof Error ? error.message : String(error),
-    });
     throw error;
   }
 }
@@ -787,16 +979,14 @@ const llmApi: ModelWorkerAPI = {
     }
 
     resetLoadingDebugState();
-    debugLog("loadModel:start");
     setStatus({
       phase: "loading",
-      detail: "Preparing tokenizer and model.",
+      detail: "Preparing processor and model.",
       progress: 0,
     });
 
     try {
       await loadResources();
-      debugLog("loadModel:complete");
       return status;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -806,10 +996,6 @@ const llmApi: ModelWorkerAPI = {
         detail: "Model failed to load.",
         error: message,
         progress: undefined,
-      });
-
-      debugLog("loadModel:error", {
-        error: message,
       });
 
       throw error;
@@ -829,7 +1015,7 @@ const llmApi: ModelWorkerAPI = {
         ? "Model folder selected, but permission must be reconnected."
         : manifestComplete
           ? "Model folder cache is ready."
-          : "Model folder selected. Missing files will be downloaded on first load.";
+          : "Model folder selected. Missing Gemma files will be downloaded on first load.";
 
     activeCacheSource = directoryHandle && manifestComplete ? "folder" : null;
 
@@ -847,17 +1033,11 @@ const llmApi: ModelWorkerAPI = {
 
   async renderDebugPrompt(messages) {
     configureEnvironment();
-    const tokenizer = await loadTokenizer();
-    return tokenizer.apply_chat_template(messages, {
-      add_generation_prompt: true,
-      tokenize: false,
-    }) as string;
+    const processor = await loadProcessor();
+    return renderStructuredDebugPrompt(processor, messages);
   },
 
   async generateRawText(request, onStream) {
-    debugLog("generate:raw-start", {
-      promptChars: request.prompt.length,
-    });
     const { output, prompt } = await generateText(request.prompt, onStream);
     return {
       output,
@@ -866,11 +1046,8 @@ const llmApi: ModelWorkerAPI = {
   },
 
   async generateTurn(request, onStream) {
-    debugLog("generate:start", {
-      agentNotes: request.agentNotes?.length ?? 0,
-      conversationMessages: request.conversation.length,
-    });
-    const prompt = renderGenerationPrompt(request);
+    const { processor } = await loadResources();
+    const prompt = renderGenerationPrompt(processor, request);
     const { output } = await generateText(prompt, onStream);
     const decision = normalizeDecision(output, Boolean(request.partialOutput));
     return {
@@ -880,7 +1057,6 @@ const llmApi: ModelWorkerAPI = {
   },
 
   async abortGeneration() {
-    debugLog("abortGeneration");
     interruptCriteria.interrupt();
   },
 

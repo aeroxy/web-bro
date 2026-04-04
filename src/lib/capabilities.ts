@@ -54,7 +54,7 @@ export function getCapabilityReport(): CapabilityReport {
   }
 
   if (!hasWebGPU) {
-    reasons.push("WebGPU is required for the in-browser Qwen runtime.");
+    reasons.push("WebGPU is required for the in-browser Gemma runtime.");
   }
 
   return {

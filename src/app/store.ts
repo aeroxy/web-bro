@@ -42,7 +42,6 @@ import {
   truncate,
 } from "../lib/text";
 import { getRuntime, type RuntimeServices } from "../services/runtime";
-import { renderGenerationPrompt } from "../workers/llm.worker";
 
 export interface LogEntry {
   id: string;
@@ -54,7 +53,7 @@ export interface LogEntry {
   finished?: boolean;
   error?: string | null;
   toolName?: AgentToolName;
-  toolArgs?: any;
+  toolArgs?: unknown;
   toolResult?: ToolResultContext;
 }
 
@@ -203,25 +202,20 @@ function toModelConversation(
     .slice(-12)
     .map((message) => {
       if (message.role === "tool") {
-        const status =
-          message.status === "complete"
-            ? "SUCCESS"
-            : message.status === "error"
-              ? "FAILED"
-              : "RUNNING";
-        const content = [
-          `[Tool: ${message.tool}]`,
-          `Status: ${status}`,
-          `Summary: ${message.summary}`,
-          message.detail ? `Result:\n${message.detail}` : "",
-        ]
-          .filter(Boolean)
-          .join("\n");
         return {
           role: "tool" as const,
-          content,
+          content: serializeToolResultMessage(message),
         };
       }
+
+      if (message.role === "assistant" && message.toolCall) {
+        return {
+          role: "assistant" as const,
+          content: "",
+          tool_calls: [message.toolCall],
+        };
+      }
+
       return {
         role: message.role,
         content: message.content,
@@ -270,7 +264,19 @@ function buildToolCallPreview(call: AgentToolCall): string {
 }
 
 function serializeToolCall(call: AgentToolCall): string {
-  return `[TOOL:${call.tool}]${JSON.stringify(call.args, null, 0)}[END]`;
+  return `<|tool_call>call:${call.tool}${JSON.stringify(call.args)}<tool_call|>`;
+}
+
+function serializeToolResultMessage(message: ToolMessage): string {
+  return JSON.stringify(
+    {
+      detail: message.detail ?? null,
+      ok: message.status === "complete",
+      summary: message.summary,
+    },
+    null,
+    0,
+  );
 }
 
 const FILE_PERMISSION_DESCRIPTOR: FileSystemHandlePermissionDescriptor = {
@@ -569,21 +575,23 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
               threadId,
             });
 
-            const snapshot = await runtime.workspace.refresh();
-            await syncWorkspace(snapshot, {
-              activeFile: {
-                content: call.args.content,
-                path: result.path,
-                revision: result.nextRevision,
-                truncated: false,
+            set((state) => ({
+              workspace: {
+                ...state.workspace,
+                activeFile: {
+                  content: call.args.content,
+                  path: result.path,
+                  revision: result.nextRevision,
+                  truncated: false,
+                },
+                diff: {
+                  after: call.args.content,
+                  backupId,
+                  before: result.previousContent,
+                  path: result.path,
+                },
               },
-              diff: {
-                after: call.args.content,
-                backupId,
-                before: result.previousContent,
-                path: result.path,
-              },
-            });
+            }));
 
             knownRevisions.set(result.path, result.nextRevision);
 
@@ -603,21 +611,6 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
               },
               detail,
               summary,
-            };
-          }
-          default: {
-            // This case is unreachable at runtime because the switch covers all AgentToolName values.
-            // It exists for safety if the union expands in the future.
-            const tool = (call as any).tool;
-            return {
-              context: {
-                detail: `Unknown tool: ${tool}`,
-                ok: false,
-                summary: `Unknown tool: ${tool}`,
-                tool: tool,
-              },
-              detail: `Unknown tool: ${tool}`,
-              summary: `Unknown tool: ${tool}`,
             };
           }
         }
@@ -1287,11 +1280,10 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
           });
 
           const toolResults: ToolResultContext[] = [];
-          const agentNotes: string[] = [];
           let retryMessages: ModelConversationMessage[] = [];
           const knownRevisions = new Map<string, string | null>();
           let accumulatedContent = ""; // For accumulating partial outputs
-          let currentTag: "[TEXT]" | "[TOOL]" | null = null;
+          let currentTag: "text" | "tool" | null = null;
           let formatRetryCount = 0;
 
           let step = 0;
@@ -1311,7 +1303,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
                 toolResults.length > 0
                   ? "Reviewing tool results..."
                   : currentTag
-                    ? `Continuing ${currentTag === "[TOOL]" ? "tool call" : "response"}...`
+                    ? `Continuing ${currentTag === "tool" ? "tool call" : "response"}...`
                     : "Planning the next step...",
             });
 
@@ -1321,14 +1313,14 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
                 ...toModelConversation(thread.messages),
                 ...retryMessages,
               ],
-              agentNotes,
+              agentNotes: [],
               workspaceSummary: get().workspace.summary,
               partialOutput: accumulatedContent || undefined,
             };
             const logEntry: LogEntry = {
               id: logId,
               timestamp: now(),
-              payload: renderGenerationPrompt(turnRequest),
+              payload: "",
               raw: "",
               parsed: {
                 type: "final",
@@ -1401,18 +1393,9 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
                   content: accumulatedContent,
                 },
               ];
-              if (decision.partial.startsWith("[TOOL:")) {
-                currentTag = "[TOOL]";
-              } else if (decision.partial.startsWith("[TEXT]")) {
-                currentTag = "[TEXT]";
-              }
-              if (agentNotes.length === 0) {
-                agentNotes.push(
-                  currentTag === "[TOOL]"
-                    ? "I did not finish my last tool call due to the output limit. Continue from where I left off (DON'T repeat myself, DON'T start from [TOOL:name] again) and only add [END] when the full tool call is complete."
-                    : "I did not finish my last response due to the output limit. Continue from where I left off (DON'T repeat myself, DON'T start from [TEXT] again) and only add [END] when the full response is complete.",
-                );
-              }
+              currentTag = decision.partial.startsWith("<|tool_call>")
+                ? "tool"
+                : "text";
               continue;
             }
 
@@ -1421,7 +1404,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
               formatRetryCount++;
               if (formatRetryCount >= 2) {
                 await appendAssistantMessage(
-                  `Format error: ${decision.message}. Please use [TEXT]...[END] or [TOOL:name]{json}[END].`,
+                  `Format error: ${decision.message}.`,
                   "error",
                 );
                 return;
@@ -1433,38 +1416,16 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
                       content: decision.raw,
                     },
                     {
-                      role:
-                        decision.message ===
-                          "Tool call requested but no valid JSON found." ||
-                        decision.message ===
-                          "Tool call JSON could not be parsed."
-                          ? "tool"
-                          : "system",
-                      content:
-                        decision.message ===
-                          "Tool call requested but no valid JSON found." ||
-                        decision.message ===
-                          "Tool call JSON could not be parsed."
-                          ? `Format error: ${decision.message} Try again.`
-                          : `Format error: The previous msg is malformed. ${decision.message} Try again.`,
+                      role: "system",
+                      content: `Your previous response was invalid: ${decision.message} Return either plain text or a valid tool call.`,
                     },
                   ]
                 : [
                     {
                       role: "system",
-                      content: `Format error: The previous msg is malformed. ${decision.message} Try again.`,
+                      content: `Your previous response was invalid: ${decision.message} Return either plain text or a valid tool call.`,
                     },
                   ];
-              agentNotes.length = 0;
-              if (
-                decision.message ===
-                  "Tool call requested but no valid JSON found." ||
-                decision.message === "Tool call JSON could not be parsed."
-              ) {
-                agentNotes.push(
-                  "Begin with [TOOL:name] in the answer, and end with [END].",
-                );
-              }
               continue;
             }
 
@@ -1491,7 +1452,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
             if (decision.type === "tool") {
               // If we were accumulating text, this shouldn't happen
               // but if we were accumulating tool JSON, merge it
-              if (currentTag === "[TOOL]" && accumulatedContent) {
+              if (currentTag === "tool" && accumulatedContent) {
                 // Try to merge accumulated partial with current tool call
                 // This is a fallback - ideally the tool call is complete now
               }
@@ -1514,6 +1475,10 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
                 id: assistantToolMessageId,
                 role: "assistant",
                 status: "complete",
+                toolCall: {
+                  name: decision.tool,
+                  arguments: decision.args as Record<string, unknown>,
+                },
               };
               const toolMessage: ToolMessage = {
                 call: buildToolCallPreview(decision),
@@ -1587,7 +1552,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
             }));
           }
 
-          // We should have a final response from [TEXT] or accumulated continuation content
+          // We should have a final response or accumulated continuation content
           const message =
             finalResponse?.message.trim() || accumulatedContent.trim();
           if (message) {

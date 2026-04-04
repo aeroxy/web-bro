@@ -15,7 +15,7 @@ The agent can use the following tools in a loop:
 1. The LLM worker receives a user query and decides which tool(s) to use.
 2. It invokes the appropriate tool via the workspace worker.
 3. The workspace worker performs the operation and returns the result.
-4. The LLM worker processes the result and may decide to use another tool.
+4. The LLM worker replays the tool result back to the model and may decide to use another tool.
 5. This continues until the LLM worker determines it has enough information to formulate a response.
 6. The final response is generated and sent back to the user.
 

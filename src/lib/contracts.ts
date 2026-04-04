@@ -107,6 +107,11 @@ export interface AgentErrorResponse {
   raw: string;
 }
 
+export interface ModelToolCall {
+  name: AgentToolName;
+  arguments: Record<string, unknown>;
+}
+
 export type AgentDecision =
   | AgentToolCall
   | AgentFinalResponse
@@ -116,6 +121,7 @@ export type AgentDecision =
 export interface ModelConversationMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: string;
+  tool_calls?: ModelToolCall[];
 }
 
 export interface ToolResultContext {
@@ -224,6 +230,7 @@ export interface AssistantMessage {
   content: string;
   createdAt: string;
   status: "streaming" | "complete" | "error";
+  toolCall?: ModelToolCall;
 }
 
 export interface ToolMessage {

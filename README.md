@@ -2,9 +2,11 @@
 
 Browser-only workspace agent built with transformer.js.
 
+**Repository:** https://github.com/aeroxy/web-bro
+
 ## What It Does
 
-- Runs Qwen 3.5 2B ONNX fully in the browser on WebGPU.
+- Runs Gemma 4 E2B-it ONNX fully in the browser on WebGPU.
 - Lets the user pick a local folder as the workspace with the File System Access API.
 - Uses a shallow tool loop for `list_dir`, `search_text`, `read_file`, and `write_file`.
 - Writes directly into the selected workspace, snapshots the previous contents in IndexedDB, and shows a diff with one-click undo.
@@ -34,7 +36,7 @@ pnpm e2e
 ## Architecture
 
 - `src/app/store.ts`: Zustand vanilla store, persistence wiring, agent loop orchestration.
-- `src/workers/llm.worker.ts`: Qwen model loading, decision pass, streamed answer pass, cancellation.
+- `src/workers/llm.worker.ts`: Gemma model loading, native tool-call prompting via `apply_chat_template`, streamed answer pass, cancellation.
 - `src/workers/workspace.worker.ts`: directory traversal, file reads, text search, writes, delete-on-undo support.
 - `src/features/chat` and `src/features/workspace`: UI shell.
 - `public/_headers` and `public/_redirects`: Cloudflare Pages static deployment defaults.
