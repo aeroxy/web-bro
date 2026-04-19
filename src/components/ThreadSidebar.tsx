@@ -53,7 +53,7 @@ export function ThreadSidebar() {
             <img
               alt="Web Bro"
               className="h-full w-full scale-[1.18] object-cover object-center"
-              src="/icon-512.png"
+              src={`${import.meta.env.BASE_URL}icon-512.png`}
             />
           </div>
         </div>
