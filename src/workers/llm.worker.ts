@@ -935,7 +935,7 @@ async function generateText(
           ).sequences;
     const decoded =
       processor.tokenizer!.batch_decode(
-        sequences.slice(null, [promptLength, null]),
+        sequences.slice(null, [promptLength, sequences.dims[sequences.dims.length - 1]!]),
         {
           skip_special_tokens: false,
         },

@@ -23,7 +23,7 @@
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.2.7",
     "@fontsource/ibm-plex-sans": "^5.2.8",
-    "@huggingface/transformers": "4.0.1",
+    "@huggingface/transformers": "4.2.0",
     "@monaco-editor/react": "^4.7.0",
     "clsx": "^2.1.1",
     "comlink": "^4.4.2",
