@@ -1293,6 +1293,12 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
           });
 
           const onStream = proxy((chunk: StreamChunk) => {
+            if (chunk.type === "reset") {
+              set((state) => ({
+                debug: { ...state.debug, output: chunk.text },
+              }));
+              return;
+            }
             if (chunk.type !== "text") {
               return;
             }
@@ -1462,15 +1468,15 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
             get().addLog(logEntry);
 
             const onStream = proxy((chunk: StreamChunk) => {
-              if (chunk.type !== "text") return;
+              if (chunk.type !== "text" && chunk.type !== "reset") return;
               const currentLog = get().logs.find((l) => l.id === logId);
               if (!currentLog) return;
               get().updateLog({
                 ...currentLog,
-                streamingChunks: [
-                  ...(currentLog.streamingChunks ?? []),
-                  chunk.text,
-                ],
+                streamingChunks:
+                  chunk.type === "reset"
+                    ? [chunk.text]
+                    : [...(currentLog.streamingChunks ?? []), chunk.text],
               });
             });
 

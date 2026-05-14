@@ -383,10 +383,12 @@ export function createChromeAIBackend(): ChromeAIBackend {
               onStream?.({ type: "text", text: delta } satisfies StreamChunk);
             }
           } else {
-            // Cumulative stream replaced its state mid-flight (rare). Keep
-            // the new value as canonical; don't re-emit, since the consumer
-            // already saw the previous text.
+            // Cumulative stream replaced its state mid-flight (rare). Tell
+            // the consumer to drop everything streamed so far and re-sync to
+            // the new canonical value — otherwise the UI would show stale
+            // text concatenated with future deltas of the new value.
             full = value;
+            onStream?.({ type: "reset", text: value } satisfies StreamChunk);
           }
         } else {
           // delta mode (or first chunk): append and forward as-is.

@@ -156,10 +156,13 @@ export interface GenerateRawTextResult {
   output: string;
 }
 
-export interface StreamChunk {
-  type: "text";
-  text: string;
-}
+export type StreamChunk =
+  | { type: "text"; text: string }
+  // Sent when the producer needs to replace everything previously streamed
+  // (e.g. a cumulative-mode model rewrites its output mid-flight). Consumers
+  // should discard any accumulated text and use `text` as the new canonical
+  // running value.
+  | { type: "reset"; text: string };
 
 export type StreamListener = (chunk: StreamChunk) => void;
 

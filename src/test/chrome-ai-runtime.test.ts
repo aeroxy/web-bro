@@ -307,12 +307,32 @@ describe("createChromeAIBackend", () => {
     } satisfies MockLanguageModel;
 
     const backend = createChromeAIBackend();
-    const result = await backend.generateTurn(baseRequest);
-    // Final should reflect the corrected snapshot, NOT "abcdef" + finalJson.
+    const observed: StreamChunk[] = [];
+    const result = await backend.generateTurn(baseRequest, (chunk) => {
+      observed.push(chunk);
+    });
+
+    // Final decision reflects the corrected snapshot, NOT "abcdef" + finalJson.
     expect(result.decision.type).toBe("final");
     if (result.decision.type === "final") {
       expect(result.decision.message).toBe("Corrected.");
     }
+
+    // A reset chunk must be emitted so consumers can drop the stale text and
+    // re-sync — otherwise the UI would show "abcdef" plus future deltas of
+    // the corrected value, diverging from the parsed decision.
+    const resetChunk = observed.find((c) => c.type === "reset");
+    expect(resetChunk).toBeDefined();
+    expect(resetChunk?.text).toBe(finalJson);
+
+    // Reconstruct what a "reset-aware" consumer would render and check it
+    // matches the parsed full text.
+    let rendered = "";
+    for (const c of observed) {
+      if (c.type === "reset") rendered = c.text;
+      else if (c.type === "text") rendered += c.text;
+    }
+    expect(rendered).toBe(finalJson);
   });
 
   it("reuses the cached session across turns when the conversation extends a prefix", async () => {
