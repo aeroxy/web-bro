@@ -219,6 +219,28 @@ describe("createChromeAIBackend", () => {
     expect(capturedSignal?.aborted).toBe(true);
   });
 
+  it("renderDebugPrompt mirrors what generateTurn actually sends", async () => {
+    installLanguageModel("available", "");
+    const backend = createChromeAIBackend();
+    const debugJson = await backend.renderDebugPrompt([
+      { role: "user", content: "hello" },
+    ]);
+    const debug = JSON.parse(debugJson) as {
+      backend: string;
+      systemPrompt: string;
+      messages: unknown;
+      responseConstraint: { oneOf: unknown[] };
+    };
+    expect(debug.backend).toBe("chrome-ai");
+    // Must include the chrome-specific format addendum so devs see the actual
+    // instructions the model receives, not just the shared base persona.
+    expect(debug.systemPrompt).toContain("RESPONSE FORMAT");
+    expect(debug.systemPrompt).toContain('"kind":"final"');
+    expect(debug.systemPrompt).toContain('User: "hello"');
+    // And the JSON schema constraint that shapes the output.
+    expect(debug.responseConstraint.oneOf.length).toBeGreaterThan(1);
+  });
+
   it("model cache stubs report 'Managed by Chrome.'", async () => {
     installLanguageModel("available", "");
     const backend = createChromeAIBackend();
