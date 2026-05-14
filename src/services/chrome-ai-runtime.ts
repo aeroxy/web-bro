@@ -599,8 +599,14 @@ export function createChromeAIBackend(): ChromeAIBackend {
 
         setStatus({ phase: "generating", detail: "Thinking…" });
 
+        // Collapse to a bare string ONLY when the single pending message is
+        // a plain user turn. Otherwise pass the structured array so Chrome
+        // preserves the role — passing assistant content as a string would
+        // make the API treat it as a new user prompt.
         const promptInput: string | PromptInputMessage[] =
-          pending.length === 1 && pending[0] ? pending[0].content : pending;
+          pending.length === 1 && pending[0]?.role === "user"
+            ? pending[0].content
+            : pending;
         const stream = activeSession.promptStreaming(promptInput, {
           signal: ctrl.signal,
           responseConstraint: buildResponseConstraint(),

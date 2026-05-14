@@ -219,6 +219,51 @@ describe("createChromeAIBackend", () => {
     expect(capturedSignal?.aborted).toBe(true);
   });
 
+  it("preserves message roles when the last pending message isn't a user turn", async () => {
+    let capturedInput: unknown = null;
+    const session: MockSession = {
+      destroy: vi.fn(),
+      prompt: vi.fn(),
+      promptStreaming: vi.fn((input: unknown) => {
+        capturedInput = input;
+        return streamFromChunks([
+          JSON.stringify({ kind: "final", message: "ok" }),
+        ]);
+      }),
+    };
+    (
+      globalThis as unknown as { LanguageModel: MockLanguageModel }
+    ).LanguageModel = {
+      availability: vi.fn(async () => "available"),
+      create: vi.fn(async () => session),
+    } satisfies MockLanguageModel;
+
+    const backend = createChromeAIBackend();
+    // Conversation ending in an assistant tool_call — toPromptInputMessages
+    // synthesizes a {role:"assistant"} turn from it. Cold rebuild slices off
+    // the last entry as `pending`. If we collapsed to a string we'd flip
+    // that turn into a user prompt and confuse the model.
+    await backend.generateTurn({
+      conversation: [
+        { role: "user", content: "list src" },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ name: "list_dir", arguments: { path: "src" } }],
+        },
+      ],
+      workspaceSummary: "ws",
+    });
+
+    // Must be passed as a structured array, not a bare string, so the role
+    // survives the round-trip into the Chrome session.
+    expect(typeof capturedInput).not.toBe("string");
+    expect(Array.isArray(capturedInput)).toBe(true);
+    const arr = capturedInput as { role: string; content: string }[];
+    expect(arr).toHaveLength(1);
+    expect(arr[0]?.role).toBe("assistant");
+  });
+
   it("renderDebugPrompt mirrors what generateTurn actually sends", async () => {
     installLanguageModel("available", "");
     const backend = createChromeAIBackend();
