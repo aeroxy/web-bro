@@ -228,6 +228,262 @@ describe("createChromeAIBackend", () => {
     expect(status.source).toBe(null);
   });
 
+  it("forwards delta-mode stream chunks unchanged and concatenates them", async () => {
+    const finalJson = JSON.stringify({ kind: "final", message: "Hi there!" });
+    // Split the JSON into three deltas; none extends the previous as a prefix.
+    const chunks = [
+      finalJson.slice(0, 5),
+      finalJson.slice(5, 20),
+      finalJson.slice(20),
+    ];
+    const session: MockSession = {
+      destroy: vi.fn(),
+      prompt: vi.fn(),
+      promptStreaming: vi.fn(() => streamFromChunks(chunks)),
+    };
+    (
+      globalThis as unknown as { LanguageModel: MockLanguageModel }
+    ).LanguageModel = {
+      availability: vi.fn(async () => "available"),
+      create: vi.fn(async () => session),
+    } satisfies MockLanguageModel;
+
+    const backend = createChromeAIBackend();
+    const observed: string[] = [];
+    const result = await backend.generateTurn(baseRequest, (chunk) => {
+      observed.push(chunk.text);
+    });
+    expect(observed).toEqual(chunks);
+    expect(result.decision.type).toBe("final");
+  });
+
+  it("emits only the delta for cumulative-mode streams", async () => {
+    const finalJson = JSON.stringify({ kind: "final", message: "Hi there!" });
+    // Cumulative: each chunk is the running total.
+    const chunks = [finalJson.slice(0, 5), finalJson.slice(0, 20), finalJson];
+    const session: MockSession = {
+      destroy: vi.fn(),
+      prompt: vi.fn(),
+      promptStreaming: vi.fn(() => streamFromChunks(chunks)),
+    };
+    (
+      globalThis as unknown as { LanguageModel: MockLanguageModel }
+    ).LanguageModel = {
+      availability: vi.fn(async () => "available"),
+      create: vi.fn(async () => session),
+    } satisfies MockLanguageModel;
+
+    const backend = createChromeAIBackend();
+    const observed: string[] = [];
+    const result = await backend.generateTurn(baseRequest, (chunk) => {
+      observed.push(chunk.text);
+    });
+    expect(observed.join("")).toBe(finalJson);
+    expect(observed[0]).toBe(finalJson.slice(0, 5));
+    expect(observed[1]).toBe(finalJson.slice(5, 20));
+    expect(observed[2]).toBe(finalJson.slice(20));
+    expect(result.decision.type).toBe("final");
+  });
+
+  it("does not duplicate text when a cumulative stream replaces its state mid-flight", async () => {
+    const finalJson = JSON.stringify({ kind: "final", message: "Corrected." });
+    // First two chunks look cumulative, then the model "rewrites" and emits a
+    // fresh snapshot that no longer extends the previous value.
+    const chunks = [
+      "abc",
+      "abcdef",
+      finalJson, // does not start with "abcdef"
+    ];
+    const session: MockSession = {
+      destroy: vi.fn(),
+      prompt: vi.fn(),
+      promptStreaming: vi.fn(() => streamFromChunks(chunks)),
+    };
+    (
+      globalThis as unknown as { LanguageModel: MockLanguageModel }
+    ).LanguageModel = {
+      availability: vi.fn(async () => "available"),
+      create: vi.fn(async () => session),
+    } satisfies MockLanguageModel;
+
+    const backend = createChromeAIBackend();
+    const result = await backend.generateTurn(baseRequest);
+    // Final should reflect the corrected snapshot, NOT "abcdef" + finalJson.
+    expect(result.decision.type).toBe("final");
+    if (result.decision.type === "final") {
+      expect(result.decision.message).toBe("Corrected.");
+    }
+  });
+
+  it("reuses the cached session across turns when the conversation extends a prefix", async () => {
+    const create = vi.fn();
+    const promptStreaming = vi.fn();
+    const sessionDestroy = vi.fn();
+    const session: MockSession = {
+      destroy: sessionDestroy,
+      prompt: vi.fn(),
+      promptStreaming,
+    };
+    create.mockResolvedValue(session);
+    promptStreaming
+      .mockReturnValueOnce(
+        streamFromChunks([
+          JSON.stringify({
+            kind: "list_dir",
+            arguments: { path: "src" },
+          }),
+        ]),
+      )
+      .mockReturnValueOnce(
+        streamFromChunks([JSON.stringify({ kind: "final", message: "Done." })]),
+      );
+    (
+      globalThis as unknown as { LanguageModel: MockLanguageModel }
+    ).LanguageModel = {
+      availability: vi.fn(async () => "available"),
+      create,
+    } satisfies MockLanguageModel;
+
+    const backend = createChromeAIBackend();
+
+    // Turn 1: user asks "list src".
+    await backend.generateTurn({
+      conversation: [{ role: "user", content: "list src" }],
+      workspaceSummary: "ws",
+    });
+
+    // Turn 2: store appends [assistant tool call, tool result] to thread; the
+    // conversation grows but its user-side prefix still starts with "list src".
+    await backend.generateTurn({
+      conversation: [
+        { role: "user", content: "list src" },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ name: "list_dir", arguments: { path: "src" } }],
+        },
+        { role: "tool", content: '{"ok":true,"summary":"ok"}' },
+      ],
+      workspaceSummary: "ws",
+    });
+
+    // Only ONE session created across the two turns — the second turn reused.
+    expect(create).toHaveBeenCalledTimes(1);
+    // promptStreaming called twice — once per turn.
+    expect(promptStreaming).toHaveBeenCalledTimes(2);
+    // The second prompt() call should pass only the new tool-result message,
+    // not the full conversation.
+    const secondPromptInput = promptStreaming.mock.calls[1]?.[0];
+    expect(typeof secondPromptInput).toBe("string");
+    expect(String(secondPromptInput)).toContain("Tool result:");
+    expect(String(secondPromptInput)).not.toContain("list src");
+  });
+
+  it("rebuilds the session when the system prompt changes (workspace summary changed)", async () => {
+    const create = vi.fn();
+    const session: MockSession = {
+      destroy: vi.fn(),
+      prompt: vi.fn(),
+      promptStreaming: vi.fn(() =>
+        streamFromChunks([JSON.stringify({ kind: "final", message: "ok" })]),
+      ),
+    };
+    create.mockResolvedValue(session);
+    (
+      globalThis as unknown as { LanguageModel: MockLanguageModel }
+    ).LanguageModel = {
+      availability: vi.fn(async () => "available"),
+      create,
+    } satisfies MockLanguageModel;
+
+    const backend = createChromeAIBackend();
+
+    await backend.generateTurn({
+      conversation: [{ role: "user", content: "hello" }],
+      workspaceSummary: 'Workspace "demo" has 1 file.',
+    });
+    await backend.generateTurn({
+      conversation: [{ role: "user", content: "hello" }],
+      workspaceSummary: 'Workspace "demo" has 99 files.',
+    });
+
+    // Both turns spawned their own session because the system prompt embeds
+    // the workspace summary.
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
+  it("rebuilds when the conversation prefix no longer matches (thread switch)", async () => {
+    const create = vi.fn();
+    const session: MockSession = {
+      destroy: vi.fn(),
+      prompt: vi.fn(),
+      promptStreaming: vi.fn(() =>
+        streamFromChunks([JSON.stringify({ kind: "final", message: "ok" })]),
+      ),
+    };
+    create.mockResolvedValue(session);
+    (
+      globalThis as unknown as { LanguageModel: MockLanguageModel }
+    ).LanguageModel = {
+      availability: vi.fn(async () => "available"),
+      create,
+    } satisfies MockLanguageModel;
+
+    const backend = createChromeAIBackend();
+
+    await backend.generateTurn({
+      conversation: [{ role: "user", content: "first thread message" }],
+      workspaceSummary: "ws",
+    });
+    // Switch threads — entirely different first message.
+    await backend.generateTurn({
+      conversation: [{ role: "user", content: "different thread entirely" }],
+      workspaceSummary: "ws",
+    });
+
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
+  it("invalidates the cache after abortGeneration so the next turn rebuilds", async () => {
+    const create = vi.fn();
+    const session: MockSession = {
+      destroy: vi.fn(),
+      prompt: vi.fn(),
+      promptStreaming: vi.fn(() =>
+        streamFromChunks([JSON.stringify({ kind: "final", message: "ok" })]),
+      ),
+    };
+    create.mockResolvedValue(session);
+    (
+      globalThis as unknown as { LanguageModel: MockLanguageModel }
+    ).LanguageModel = {
+      availability: vi.fn(async () => "available"),
+      create,
+    } satisfies MockLanguageModel;
+
+    const backend = createChromeAIBackend();
+
+    await backend.generateTurn({
+      conversation: [{ role: "user", content: "hi" }],
+      workspaceSummary: "ws",
+    });
+    await backend.abortGeneration();
+    await backend.generateTurn({
+      conversation: [
+        { role: "user", content: "hi" },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ name: "list_dir", arguments: { path: "." } }],
+        },
+        { role: "tool", content: "ok" },
+      ],
+      workspaceSummary: "ws",
+    });
+
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
   it("destroy aborts in-flight work, destroys the session, and resets status", async () => {
     const sessionDestroy = vi.fn();
     let captured: AbortSignal | undefined;

@@ -295,63 +295,102 @@ export interface ChromeAIBackend extends ModelWorkerAPI {
   destroy(): void;
 }
 
+interface CachedTurnSession {
+  session: LanguageModelSession;
+  systemPrompt: string;
+  // User-side messages (user/system/tool-as-user) the session has already
+  // ingested, in order. Assistant outputs are NOT tracked here — the session
+  // produced them itself, so they live in its internal context implicitly.
+  consumed: PromptInputMessage[];
+}
+
+function userSideOnly(messages: PromptInputMessage[]): PromptInputMessage[] {
+  return messages.filter((m) => m.role !== "assistant");
+}
+
+function arePrefix(
+  prefix: PromptInputMessage[],
+  full: PromptInputMessage[],
+): boolean {
+  if (prefix.length > full.length) return false;
+  for (let i = 0; i < prefix.length; i++) {
+    const a = prefix[i];
+    const b = full[i];
+    if (!a || !b || a.role !== b.role || a.content !== b.content) return false;
+  }
+  return true;
+}
+
 export function createChromeAIBackend(): ChromeAIBackend {
   let status: ModelStatus = { phase: "idle", detail: "Model idle." };
   let abortController: AbortController | null = null;
-  let session: LanguageModelSession | null = null;
+  // The single cached session used across consecutive `generateTurn` calls
+  // when their prefix matches. Invalidated on abort, error, system-prompt
+  // change, or non-prefix conversation change.
+  let cached: CachedTurnSession | null = null;
 
   const setStatus = (next: ModelStatus): void => {
     status = next;
   };
 
-  const ensureSession = async (
-    systemPrompt: string,
-    signal?: AbortSignal,
-  ): Promise<LanguageModelSession> => {
-    if (session) {
-      session.destroy();
-      session = null;
-    }
-    const model = getLanguageModel();
-    session = await model.create({
-      systemPrompt,
-      monitor(m) {
-        m.addEventListener("downloadprogress", (event) => {
-          const progress = Math.round((event.loaded ?? 0) * 100);
-          setStatus({
-            phase: "loading",
-            detail: `Downloading Gemini Nano… ${progress}%`,
-            progress,
-          });
-        });
-      },
-      signal,
+  const invalidateCache = (): void => {
+    cached?.session.destroy();
+    cached = null;
+  };
+
+  const buildMonitor = () => (m: CreateMonitor) => {
+    m.addEventListener("downloadprogress", (event) => {
+      const progress = Math.round((event.loaded ?? 0) * 100);
+      setStatus({
+        phase: "loading",
+        detail: `Downloading Gemini Nano… ${progress}%`,
+        progress,
+      });
     });
-    return session;
   };
 
   const streamToOnStream = async (
     stream: ReadableStream<string>,
     onStream?: StreamListener,
   ): Promise<string> => {
+    // Current Chrome Prompt API streams per-chunk deltas, but earlier builds
+    // emitted cumulative snapshots. Detect the mode from the first comparable
+    // chunk and lock it for the rest of the stream — per-chunk detection
+    // mishandles cumulative streams that don't strictly extend the previous
+    // value (e.g. a model self-correction would duplicate text).
     const reader = stream.getReader();
     let full = "";
-    let prev = "";
+    let mode: "delta" | "cumulative" | null = null;
+
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      if (typeof value !== "string") continue;
-      // Some Chrome builds emit cumulative text; emit only the delta to onStream.
-      let delta = value;
-      if (value.startsWith(prev) && value.length >= prev.length) {
-        delta = value.slice(prev.length);
-        full = value;
-      } else {
-        full += value;
+      if (typeof value !== "string" || value === "") continue;
+
+      if (mode === null && full !== "") {
+        mode =
+          value.length > full.length && value.startsWith(full)
+            ? "cumulative"
+            : "delta";
       }
-      prev = full;
-      if (delta) {
-        onStream?.({ type: "text", text: delta } satisfies StreamChunk);
+
+      if (mode === "cumulative") {
+        if (value.startsWith(full)) {
+          const delta = value.slice(full.length);
+          full = value;
+          if (delta) {
+            onStream?.({ type: "text", text: delta } satisfies StreamChunk);
+          }
+        } else {
+          // Cumulative stream replaced its state mid-flight (rare). Keep the
+          // new value as canonical; don't re-emit, since the consumer already
+          // saw the previous text.
+          full = value;
+        }
+      } else {
+        // delta mode (or first chunk): append and forward as-is.
+        full += value;
+        onStream?.({ type: "text", text: value } satisfies StreamChunk);
       }
     }
     return full;
@@ -375,7 +414,13 @@ export function createChromeAIBackend(): ChromeAIBackend {
           detail: describeAvailability(availability),
           progress: availability === "available" ? 100 : 0,
         });
-        await ensureSession("");
+        // Warm up: verify we can create a session, then drop it. The real
+        // session is built lazily in generateTurn with the actual systemPrompt.
+        const warmup = await model.create({
+          systemPrompt: "",
+          monitor: buildMonitor(),
+        });
+        warmup.destroy();
         setStatus({
           phase: "ready",
           detail: "Gemini Nano ready (Chrome built-in).",
@@ -452,9 +497,16 @@ export function createChromeAIBackend(): ChromeAIBackend {
       const ctrl = new AbortController();
       abortController = ctrl;
       setStatus({ phase: "generating", detail: "Thinking…" });
+      // Debug raw-text path: bypass the turn cache entirely. Use a throwaway
+      // session so we don't pollute the cached generateTurn state.
+      let session: LanguageModelSession | null = null;
       try {
-        const sess = await ensureSession("", ctrl.signal);
-        const stream = sess.promptStreaming(request.prompt, {
+        session = await getLanguageModel().create({
+          systemPrompt: "",
+          monitor: buildMonitor(),
+          signal: ctrl.signal,
+        });
+        const stream = session.promptStreaming(request.prompt, {
           signal: ctrl.signal,
         });
         const output = await streamToOnStream(stream, onStream);
@@ -472,6 +524,7 @@ export function createChromeAIBackend(): ChromeAIBackend {
         });
         throw error;
       } finally {
+        session?.destroy();
         if (abortController === ctrl) {
           abortController = null;
         }
@@ -485,48 +538,68 @@ export function createChromeAIBackend(): ChromeAIBackend {
       const ctrl = new AbortController();
       abortController = ctrl;
       setStatus({ phase: "generating", detail: "Thinking…" });
+
       const systemPrompt = getChromeAISystemPrompt(request);
-      const messages = toPromptInputMessages(request.conversation);
-      const lastUserIdx = (() => {
-        for (let i = messages.length - 1; i >= 0; i--) {
-          const msg = messages[i];
-          if (msg && msg.role === "user") return i;
-        }
-        return -1;
-      })();
-      const initialPrompts =
-        lastUserIdx === -1 ? messages : messages.slice(0, lastUserIdx);
-      const lastUserMessage =
-        lastUserIdx === -1 ? null : (messages[lastUserIdx] ?? null);
-      const lastUserContent = lastUserMessage?.content ?? "";
+      const allMessages = toPromptInputMessages(request.conversation);
+      const userSide = userSideOnly(allMessages);
+
+      // Decide whether to reuse the cached session or rebuild.
+      let pending: PromptInputMessage[];
+      let activeSession: LanguageModelSession;
+      let reused = false;
+
+      const canReuse =
+        cached !== null &&
+        cached.systemPrompt === systemPrompt &&
+        userSide.length > cached.consumed.length &&
+        arePrefix(cached.consumed, userSide);
 
       try {
-        if (session) {
-          session.destroy();
-          session = null;
+        if (canReuse && cached) {
+          activeSession = cached.session;
+          pending = userSide.slice(cached.consumed.length);
+          reused = true;
+        } else {
+          invalidateCache();
+
+          // Cold rebuild: seed initialPrompts with everything but the last
+          // user-side message (including synthesized assistant turns so the
+          // model sees its prior decisions in context). Prompt with the last.
+          const initialPrompts = allMessages.slice(0, -1);
+          pending = allMessages.slice(-1);
+
+          activeSession = await getLanguageModel().create({
+            systemPrompt,
+            initialPrompts,
+            signal: ctrl.signal,
+            monitor: buildMonitor(),
+          });
+          cached = {
+            session: activeSession,
+            systemPrompt,
+            // Everything currently in the session minus the prompt() input
+            // we're about to send. After prompt() resolves, we extend by
+            // `pending`.
+            consumed: userSide.slice(0, -pending.length),
+          };
         }
-        const model = getLanguageModel();
-        session = await model.create({
-          systemPrompt,
-          initialPrompts,
-          signal: ctrl.signal,
-          monitor(m) {
-            m.addEventListener("downloadprogress", (event) => {
-              const progress = Math.round((event.loaded ?? 0) * 100);
-              setStatus({
-                phase: "loading",
-                detail: `Downloading Gemini Nano… ${progress}%`,
-                progress,
-              });
-            });
-          },
-        });
+
         setStatus({ phase: "generating", detail: "Thinking…" });
-        const stream = session.promptStreaming(lastUserContent, {
+
+        const promptInput: string | PromptInputMessage[] =
+          pending.length === 1 && pending[0] ? pending[0].content : pending;
+        const stream = activeSession.promptStreaming(promptInput, {
           signal: ctrl.signal,
           responseConstraint: buildResponseConstraint(),
         });
         const output = await streamToOnStream(stream, onStream);
+
+        // Successful generation: pending is now in the session's context, and
+        // the assistant's response is too (we don't track assistant turns).
+        if (cached) {
+          cached.consumed = [...cached.consumed, ...pending];
+        }
+
         const decision = decisionFromStructuredOutput(output);
         setStatus({
           phase: "ready",
@@ -535,12 +608,20 @@ export function createChromeAIBackend(): ChromeAIBackend {
         return {
           decision,
           prompt: JSON.stringify(
-            { systemPrompt, initialPrompts, lastUserContent },
+            {
+              systemPrompt,
+              reused,
+              consumedCount: cached?.consumed.length ?? 0,
+              pending,
+            },
             null,
             2,
           ),
         };
       } catch (error) {
+        // Session may be in an inconsistent state — drop the cache so the
+        // next turn starts fresh.
+        invalidateCache();
         const message = error instanceof Error ? error.message : String(error);
         setStatus({
           phase: "error",
@@ -557,6 +638,8 @@ export function createChromeAIBackend(): ChromeAIBackend {
 
     async abortGeneration() {
       abortController?.abort();
+      // The aborted session can't be trusted to have a consistent context.
+      invalidateCache();
     },
 
     async getStatus() {
@@ -566,8 +649,7 @@ export function createChromeAIBackend(): ChromeAIBackend {
     destroy() {
       abortController?.abort();
       abortController = null;
-      session?.destroy();
-      session = null;
+      invalidateCache();
       status = { phase: "idle", detail: "Model idle." };
     },
   };
