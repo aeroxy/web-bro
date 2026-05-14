@@ -170,7 +170,7 @@ function parseGemmaToolCallArgs(
       result[key] = null;
     } else {
       const num = Number(rawVal);
-      result[key] = isNaN(num) ? rawVal : num;
+      result[key] = Number.isNaN(num) ? rawVal : num;
     }
   }
 
