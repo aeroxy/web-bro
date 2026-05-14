@@ -791,19 +791,55 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
         set({
           agentBackend: next,
           modelStatus: { phase: "idle", detail: "Model idle." },
-          modelCache:
-            next === "chrome-ai"
-              ? { ...initialModelCacheState }
-              : get().modelCache,
         });
 
         if (options.runtime) {
           // Tests inject a single shared runtime across backends — nothing to
-          // dispose or re-mount.
+          // dispose, re-hydrate, or re-mount.
           return;
         }
 
         disposeRuntime(previous);
+
+        // Re-hydrate model-cache state from the *new* runtime so the UI and
+        // downstream readers see the truthful detail/source for the active
+        // backend instead of the stale snapshot from the old one. For Gemma,
+        // also re-attach any persisted folder handle so a chrome-ai → gemma
+        // round trip preserves the user's cache-folder choice.
+        try {
+          const newRuntime = resolveRuntime();
+          const persistedSession =
+            await database.model_cache_sessions.get("active");
+          if (next === "gemma" && persistedSession?.handle) {
+            const permission = await getPermissionState(
+              persistedSession.handle,
+            );
+            const status = await newRuntime.llm.configureModelCache(
+              persistedSession.handle,
+            );
+            set({
+              modelCache: {
+                ...status,
+                handle: persistedSession.handle,
+                permission,
+                reconnectRequired: permission !== "granted",
+              },
+            });
+          } else {
+            const status = await newRuntime.llm.getModelCacheStatus();
+            set({
+              modelCache: {
+                ...status,
+                handle: null,
+                reconnectRequired: false,
+              },
+            });
+          }
+        } catch {
+          // If the new runtime fails to report its cache state, fall back to
+          // a clean default so we don't keep the previous backend's snapshot.
+          set({ modelCache: { ...initialModelCacheState } });
+        }
 
         // The workspace was mounted on the old runtime's worker; the new
         // runtime spawns a fresh workspace worker that has nothing mounted yet.
