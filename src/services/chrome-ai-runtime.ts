@@ -489,14 +489,16 @@ export function createChromeAIBackend(): ChromeAIBackend {
       const messages = toPromptInputMessages(request.conversation);
       const lastUserIdx = (() => {
         for (let i = messages.length - 1; i >= 0; i--) {
-          if (messages[i]!.role === "user") return i;
+          const msg = messages[i];
+          if (msg && msg.role === "user") return i;
         }
         return -1;
       })();
       const initialPrompts =
         lastUserIdx === -1 ? messages : messages.slice(0, lastUserIdx);
-      const lastUserContent =
-        lastUserIdx === -1 ? "" : messages[lastUserIdx]!.content;
+      const lastUserMessage =
+        lastUserIdx === -1 ? null : (messages[lastUserIdx] ?? null);
+      const lastUserContent = lastUserMessage?.content ?? "";
 
       try {
         if (session) {
