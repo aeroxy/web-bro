@@ -483,7 +483,11 @@ export function createChromeAIBackend(): ChromeAIBackend {
     },
 
     async renderDebugPrompt(messages) {
-      const systemPrompt = getSystemPrompt({
+      // Mirror exactly what generateTurn would send: the chrome-ai-augmented
+      // system prompt (with strict JSON format rules + few-shot examples) AND
+      // the JSON-schema responseConstraint. Anything less is misleading —
+      // either piece changes how the model responds.
+      const systemPrompt = getChromeAISystemPrompt({
         conversation: [],
         workspaceSummary: null,
       });
@@ -492,6 +496,7 @@ export function createChromeAIBackend(): ChromeAIBackend {
           backend: "chrome-ai",
           systemPrompt,
           messages,
+          responseConstraint: buildResponseConstraint(),
         },
         null,
         2,
