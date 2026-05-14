@@ -362,38 +362,44 @@ export function createChromeAIBackend(): ChromeAIBackend {
     let full = "";
     let mode: "delta" | "cumulative" | null = null;
 
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (typeof value !== "string" || value === "") continue;
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (typeof value !== "string" || value === "") continue;
 
-      if (mode === null && full !== "") {
-        mode =
-          value.length > full.length && value.startsWith(full)
-            ? "cumulative"
-            : "delta";
-      }
+        if (mode === null && full !== "") {
+          mode =
+            value.length > full.length && value.startsWith(full)
+              ? "cumulative"
+              : "delta";
+        }
 
-      if (mode === "cumulative") {
-        if (value.startsWith(full)) {
-          const delta = value.slice(full.length);
-          full = value;
-          if (delta) {
-            onStream?.({ type: "text", text: delta } satisfies StreamChunk);
+        if (mode === "cumulative") {
+          if (value.startsWith(full)) {
+            const delta = value.slice(full.length);
+            full = value;
+            if (delta) {
+              onStream?.({ type: "text", text: delta } satisfies StreamChunk);
+            }
+          } else {
+            // Cumulative stream replaced its state mid-flight (rare). Keep
+            // the new value as canonical; don't re-emit, since the consumer
+            // already saw the previous text.
+            full = value;
           }
         } else {
-          // Cumulative stream replaced its state mid-flight (rare). Keep the
-          // new value as canonical; don't re-emit, since the consumer already
-          // saw the previous text.
-          full = value;
+          // delta mode (or first chunk): append and forward as-is.
+          full += value;
+          onStream?.({ type: "text", text: value } satisfies StreamChunk);
         }
-      } else {
-        // delta mode (or first chunk): append and forward as-is.
-        full += value;
-        onStream?.({ type: "text", text: value } satisfies StreamChunk);
       }
+      return full;
+    } finally {
+      // Always release the lock so the underlying stream can be cancelled or
+      // garbage-collected, even if `onStream` threw or `read()` rejected.
+      reader.releaseLock();
     }
-    return full;
   };
 
   return {

@@ -168,6 +168,11 @@ function parseGemmaToolCallArgs(
       result[key] = false;
     } else if (rawVal === "null") {
       result[key] = null;
+    } else if (rawVal === "") {
+      // Number("") is 0, which would silently convert an empty bare value
+      // into the number zero. Keep it as a string so downstream type checks
+      // (e.g. `typeof path === "string"`) reject it as malformed.
+      result[key] = "";
     } else {
       const num = Number(rawVal);
       result[key] = Number.isNaN(num) ? rawVal : num;
