@@ -8,6 +8,7 @@ import {
 } from "../lib/capabilities";
 import type { DebugPromptEntry } from "../lib/chatml";
 import type {
+  AgentBackend,
   AgentDecision,
   AgentFinalResponse,
   AgentToolCall,
@@ -41,7 +42,11 @@ import {
   summarizeThreadTitle,
   truncate,
 } from "../lib/text";
-import { getRuntime, type RuntimeServices } from "../services/runtime";
+import {
+  disposeRuntime,
+  getRuntime,
+  type RuntimeServices,
+} from "../services/runtime";
 
 export interface LogEntry {
   id: string;
@@ -86,6 +91,8 @@ interface DebugState {
 
 export interface AppState {
   agentActivity: string | null;
+  agentBackend: AgentBackend;
+  setAgentBackend(backend: AgentBackend): Promise<void>;
   capabilities: CapabilityReport;
   currentThreadId: string | null;
   debug: DebugState;
@@ -304,13 +311,15 @@ async function getPermissionState(
 export function createAppStore(options: CreateAppStoreOptions = {}) {
   const database = options.database ?? db;
   const now = options.now ?? (() => new Date().toISOString());
-  const resolveRuntime = () => options.runtime ?? getRuntime();
   const resolveCapabilities = () =>
     options.capabilityReport ?? getCapabilityReport();
   const pickWorkspace = options.pickWorkspace ?? pickWorkspaceDirectory;
   const pickModelCache = pickModelCacheDirectory;
 
   const store = createStore<AppState>()((set, get) => {
+    const resolveRuntime = () =>
+      options.runtime ?? getRuntime(get().agentBackend);
+
     const createEmptyThread = (timestamp = now()): ChatThread => ({
       createdAt: timestamp,
       id: createId(),
@@ -631,6 +640,7 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
 
     return {
       agentActivity: null,
+      agentBackend: "gemma" as AgentBackend,
       capabilities: resolveCapabilities(),
       currentThreadId: null,
       debug: initialDebugState,
@@ -663,7 +673,34 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
           await persistThread(thread);
         }
 
+        const persistedBackend =
+          await database.app_settings.get("agentBackend");
+        const initialBackend: AgentBackend = await (async () => {
+          if (
+            persistedBackend &&
+            (persistedBackend.value === "gemma" ||
+              persistedBackend.value === "chrome-ai")
+          ) {
+            return persistedBackend.value;
+          }
+          if (capabilityReport.hasChromeAI) {
+            try {
+              const g = globalThis as unknown as {
+                LanguageModel?: { availability(): Promise<string> };
+              };
+              const availability = await g.LanguageModel?.availability();
+              if (availability === "available") {
+                return "chrome-ai";
+              }
+            } catch {
+              // fall through to gemma
+            }
+          }
+          return "gemma";
+        })();
+
         set({
+          agentBackend: initialBackend,
           capabilities: capabilityReport,
           currentThreadId,
           hydrated: true,
@@ -733,6 +770,62 @@ export function createAppStore(options: CreateAppStoreOptions = {}) {
       async createThread() {
         const thread = createEmptyThread();
         await commitThread(thread, true);
+      },
+
+      async setAgentBackend(next: AgentBackend) {
+        const previous = get().agentBackend;
+        if (previous === next) {
+          return;
+        }
+
+        if (get().isBusy) {
+          try {
+            await resolveRuntime().llm.abortGeneration();
+          } catch {
+            // ignore — we're switching anyway
+          }
+        }
+
+        await database.app_settings.put({ key: "agentBackend", value: next });
+
+        set({
+          agentBackend: next,
+          modelStatus: { phase: "idle", detail: "Model idle." },
+          modelCache:
+            next === "chrome-ai"
+              ? { ...initialModelCacheState }
+              : get().modelCache,
+        });
+
+        if (options.runtime) {
+          // Tests inject a single shared runtime across backends — nothing to
+          // dispose or re-mount.
+          return;
+        }
+
+        disposeRuntime(previous);
+
+        // The workspace was mounted on the old runtime's worker; the new
+        // runtime spawns a fresh workspace worker that has nothing mounted yet.
+        const ws = get().workspace;
+        if (ws.handle && ws.permission === "granted") {
+          try {
+            const snapshot = await resolveRuntime().workspace.mountWorkspace(
+              ws.handle,
+            );
+            await syncWorkspace(snapshot, {
+              handle: ws.handle,
+              permission: ws.permission,
+              reconnectRequired: false,
+            });
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            set((state) => ({
+              workspace: { ...state.workspace, error: message },
+            }));
+          }
+        }
       },
 
       async connectModelCacheFolder() {

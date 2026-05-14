@@ -1,5 +1,5 @@
+import type { AutoProcessor } from "@huggingface/transformers";
 import { describe, expect, it, vi } from "vitest";
-
 import { createAppStore } from "../app/store";
 import type {
   AgentDecision,
@@ -16,7 +16,6 @@ import type {
 } from "../lib/contracts";
 import { AppDatabase } from "../lib/db";
 import type { RuntimeServices } from "../services/runtime";
-import type { AutoProcessor } from "@huggingface/transformers";
 import {
   normalizeDecision,
   renderGenerationPrompt,
@@ -280,6 +279,7 @@ describe("app store", () => {
     });
     const store = createAppStore({
       capabilityReport: {
+        hasChromeAI: false,
         hasDirectoryPicker: true,
         hasWebGPU: true,
         isChromium: true,
@@ -362,6 +362,7 @@ describe("app store", () => {
     });
     const firstStore = createAppStore({
       capabilityReport: {
+        hasChromeAI: false,
         hasDirectoryPicker: true,
         hasWebGPU: true,
         isChromium: true,
@@ -379,6 +380,7 @@ describe("app store", () => {
 
     const secondStore = createAppStore({
       capabilityReport: {
+        hasChromeAI: false,
         hasDirectoryPicker: true,
         hasWebGPU: true,
         isChromium: true,
@@ -432,6 +434,7 @@ describe("app store", () => {
 
     const store = createAppStore({
       capabilityReport: {
+        hasChromeAI: false,
         hasDirectoryPicker: true,
         hasWebGPU: true,
         isChromium: true,
@@ -515,6 +518,7 @@ describe("app store", () => {
 
     const store = createAppStore({
       capabilityReport: {
+        hasChromeAI: false,
         hasDirectoryPicker: true,
         hasWebGPU: true,
         isChromium: true,
@@ -609,6 +613,7 @@ describe("app store", () => {
 
     const store = createAppStore({
       capabilityReport: {
+        hasChromeAI: false,
         hasDirectoryPicker: true,
         hasWebGPU: true,
         isChromium: true,
@@ -722,6 +727,7 @@ describe("app store", () => {
 
     const store = createAppStore({
       capabilityReport: {
+        hasChromeAI: false,
         hasDirectoryPicker: true,
         hasWebGPU: true,
         isChromium: true,
@@ -808,6 +814,7 @@ describe("app store", () => {
 
     const store = createAppStore({
       capabilityReport: {
+        hasChromeAI: false,
         hasDirectoryPicker: true,
         hasWebGPU: true,
         isChromium: true,
@@ -898,6 +905,7 @@ describe("app store", () => {
 
     const store = createAppStore({
       capabilityReport: {
+        hasChromeAI: false,
         hasDirectoryPicker: true,
         hasWebGPU: true,
         isChromium: true,
@@ -969,9 +977,7 @@ describe("app store", () => {
     expect(prompt).not.toContain(`${partialOutput}<end_of_turn>`);
     // The partial content from the last assistant message should not be rendered inside messages
     // (it should only appear as a raw suffix after the generation prompt)
-    expect(prompt).not.toContain(
-      `<start_of_turn>assistant\n${partialOutput}`,
-    );
+    expect(prompt).not.toContain(`<start_of_turn>assistant\n${partialOutput}`);
   });
 
   it("deletes the active thread, clears its diff, and creates a replacement when needed", async () => {
@@ -981,6 +987,7 @@ describe("app store", () => {
     });
     const store = createAppStore({
       capabilityReport: {
+        hasChromeAI: false,
         hasDirectoryPicker: true,
         hasWebGPU: true,
         isChromium: true,
@@ -1052,6 +1059,7 @@ describe("app store", () => {
     const modelHandle = createFakeHandle("models");
     const store = createAppStore({
       capabilityReport: {
+        hasChromeAI: false,
         hasDirectoryPicker: true,
         hasWebGPU: true,
         isChromium: true,
@@ -1096,6 +1104,7 @@ describe("app store", () => {
     const { renderedDebugPrompts, runtime } = createMockRuntime({});
     const store = createAppStore({
       capabilityReport: {
+        hasChromeAI: false,
         hasDirectoryPicker: true,
         hasWebGPU: true,
         isChromium: true,
@@ -1150,6 +1159,7 @@ describe("app store", () => {
     const { rawPrompts, runtime } = createMockRuntime({});
     const store = createAppStore({
       capabilityReport: {
+        hasChromeAI: false,
         hasDirectoryPicker: true,
         hasWebGPU: true,
         isChromium: true,
@@ -1202,9 +1212,7 @@ describe("app store", () => {
 
   it("returns incomplete for a truncated Gemma tool call", () => {
     expect(
-      normalizeDecision(
-        '<|tool_call>call:write_file{path:<|"|>a.txt<|"|>',
-      ),
+      normalizeDecision('<|tool_call>call:write_file{path:<|"|>a.txt<|"|>'),
     ).toEqual({
       type: "incomplete",
       partial: '<|tool_call>call:write_file{path:<|"|>a.txt<|"|>',

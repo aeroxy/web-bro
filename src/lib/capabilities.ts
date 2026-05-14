@@ -3,6 +3,7 @@ export interface CapabilityReport {
   isSecureContext: boolean;
   hasDirectoryPicker: boolean;
   hasWebGPU: boolean;
+  hasChromeAI: boolean;
   isChromium: boolean;
   reasons: string[];
 }
@@ -27,6 +28,13 @@ function detectChromium(): boolean {
   return /Chrome|Chromium|Edg/i.test(navigator.userAgent);
 }
 
+function detectChromeAI(): boolean {
+  const g = globalThis as unknown as {
+    LanguageModel?: { availability?: unknown };
+  };
+  return typeof g.LanguageModel?.availability === "function";
+}
+
 export function getCapabilityReport(): CapabilityReport {
   const isSecure =
     typeof window !== "undefined" ? window.isSecureContext : false;
@@ -36,6 +44,7 @@ export function getCapabilityReport(): CapabilityReport {
   const nav = navigator as Navigator & { gpu?: unknown };
   const hasWebGPU =
     typeof navigator !== "undefined" && "gpu" in nav && nav.gpu !== undefined;
+  const hasChromeAI = detectChromeAI();
   const isChromium = detectChromium();
   const reasons: string[] = [];
 
@@ -53,15 +62,22 @@ export function getCapabilityReport(): CapabilityReport {
     );
   }
 
-  if (!hasWebGPU) {
-    reasons.push("WebGPU is required for the in-browser Gemma runtime.");
+  if (!hasWebGPU && !hasChromeAI) {
+    reasons.push(
+      "Need either WebGPU (for in-browser Gemma) or Chrome's built-in Prompt API (Gemini Nano).",
+    );
   }
 
   return {
-    supported: isSecure && hasDirectoryPicker && hasWebGPU && isChromium,
+    supported:
+      isSecure &&
+      hasDirectoryPicker &&
+      isChromium &&
+      (hasWebGPU || hasChromeAI),
     isSecureContext: isSecure,
     hasDirectoryPicker,
     hasWebGPU,
+    hasChromeAI,
     isChromium,
     reasons,
   };

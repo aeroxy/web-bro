@@ -17,9 +17,9 @@ export function CapabilityGate({ report }: { report: CapabilityReport }) {
         <div className="panel-body flex flex-1 flex-col justify-center gap-8">
           <div className="max-w-2xl space-y-3">
             <p className="text-base text-slate-200">
-              This project intentionally targets desktop Chromium with WebGPU
-              and the File System Access API. It does not provide a degraded
-              fallback path.
+              This project intentionally targets desktop Chromium with the File
+              System Access API and either WebGPU (for the in-browser Gemma
+              runtime) or the Chrome built-in Prompt API (Gemini Nano).
             </p>
             <p className="text-sm text-slate-400">
               Open it on Chrome, Chromium, or Edge over HTTPS or localhost, then
@@ -38,7 +38,7 @@ export function CapabilityGate({ report }: { report: CapabilityReport }) {
             ))}
           </div>
 
-          <div className="grid gap-3 md:grid-cols-4">
+          <div className="grid gap-3 md:grid-cols-5">
             <div className="surface-muted rounded-3xl px-4 py-4 text-sm text-slate-300">
               Secure context: {report.isSecureContext ? "yes" : "no"}
             </div>
@@ -47,6 +47,9 @@ export function CapabilityGate({ report }: { report: CapabilityReport }) {
             </div>
             <div className="surface-muted rounded-3xl px-4 py-4 text-sm text-slate-300">
               WebGPU: {report.hasWebGPU ? "yes" : "no"}
+            </div>
+            <div className="surface-muted rounded-3xl px-4 py-4 text-sm text-slate-300">
+              Chrome AI: {report.hasChromeAI ? "yes" : "no"}
             </div>
             <div className="surface-muted rounded-3xl px-4 py-4 text-sm text-slate-300">
               Chromium: {report.isChromium ? "yes" : "no"}
