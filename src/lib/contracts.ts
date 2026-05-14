@@ -4,6 +4,8 @@ export type AgentToolName =
   | "search_text"
   | "write_file";
 
+export type AgentBackend = "gemma" | "chrome-ai";
+
 export interface WorkspaceTreeNode {
   name: string;
   path: string;

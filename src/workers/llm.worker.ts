@@ -1,18 +1,18 @@
 import {
   AutoProcessor,
+  env,
   Gemma4ForCausalLM,
   InterruptableStoppingCriteria,
   TextStreamer,
-  env,
 } from "@huggingface/transformers";
 import { expose } from "comlink";
 import {
-  renderStructuredDebugPrompt,
-  renderToolDefinition,
-} from "../lib/chatml";
+  buildToolDefinitions,
+  getSystemPrompt,
+  normalizeDecision,
+} from "../lib/agent-prompt";
+import { renderStructuredDebugPrompt } from "../lib/chatml";
 import type {
-  AgentDecision,
-  AgentToolName,
   GenerateRawTextResult,
   GenerateTurnRequest,
   GenerateTurnResult,
@@ -20,11 +20,12 @@ import type {
   ModelCacheStatus,
   ModelConversationMessage,
   ModelStatus,
-  ModelToolCall,
   ModelWorkerAPI,
   StreamChunk,
   StreamListener,
 } from "../lib/contracts";
+
+export { normalizeDecision } from "../lib/agent-prompt";
 
 const MODEL_ID = "onnx-community/gemma-4-E2B-it-ONNX";
 const DEBUG_PREFIX = "[Web Bro][LLM]";
@@ -44,12 +45,6 @@ const MODEL_FILES = [
   "onnx/embed_tokens_q4f16.onnx",
   "onnx/embed_tokens_q4f16.onnx_data",
 ] as const;
-const VALID_TOOLS: AgentToolName[] = [
-  "list_dir",
-  "read_file",
-  "search_text",
-  "write_file",
-];
 
 let processorPromise: Promise<
   Awaited<ReturnType<typeof AutoProcessor.from_pretrained>>
@@ -74,7 +69,6 @@ type LoadingProgressEvent = {
   status?: string;
 };
 
-
 function setStatus(next: ModelStatus): void {
   status = next;
 }
@@ -94,10 +88,6 @@ function debugLog(message: string, meta?: unknown): void {
   }
 
   console.debug(DEBUG_PREFIX, message, meta);
-}
-
-function previewText(value: string, maxLength = 320): string {
-  return value.length <= maxLength ? value : `${value.slice(0, maxLength)}...`;
 }
 
 function resetLoadingDebugState(): void {
@@ -472,99 +462,6 @@ async function loadResources() {
   return { processor, model };
 }
 
-function buildSystemContext(request: GenerateTurnRequest): string | null {
-  if (!request.workspaceSummary) {
-    return null;
-  }
-
-  return ["CURRENT WORKSPACE CONTEXT:", request.workspaceSummary].join("\n");
-}
-
-export const SYSTEM_PROMPT = [
-  "You are Web Bro, a workspace agent running fully inside a Chromium browser.",
-  "",
-  "Use the available functions when they are needed to inspect or modify the mounted workspace.",
-  "If no function is needed, answer in normal plain text.",
-  "Do not invent file contents, tool arguments, or workspace state that you have not inspected unless the user explicitly asked you to create them.",
-].join("\n");
-
-function buildToolDefinitions() {
-  return [
-    renderToolDefinition({
-      name: "list_dir",
-      description: "List files and directories under a workspace path.",
-      parameters: {
-        type: "object",
-        properties: {
-          path: {
-            type: "string",
-            description:
-              "Workspace-relative directory path. Use . for the root.",
-          },
-        },
-      },
-    }),
-    renderToolDefinition({
-      name: "read_file",
-      description: "Read a UTF-8 text file from the workspace.",
-      parameters: {
-        type: "object",
-        properties: {
-          path: {
-            type: "string",
-            description: "Workspace-relative file path to read.",
-          },
-        },
-        required: ["path"],
-      },
-    }),
-    renderToolDefinition({
-      name: "search_text",
-      description: "Search the workspace for a text query.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: {
-            type: "string",
-            description: "Text query to search for.",
-          },
-        },
-        required: ["query"],
-      },
-    }),
-    renderToolDefinition({
-      name: "write_file",
-      description:
-        "Write a UTF-8 text file in the workspace, replacing the file if it already exists.",
-      parameters: {
-        type: "object",
-        properties: {
-          path: {
-            type: "string",
-            description: "Workspace-relative file path to write.",
-          },
-          content: {
-            type: "string",
-            description: "Complete UTF-8 file contents to write.",
-          },
-        },
-        required: ["path", "content"],
-      },
-    }),
-  ];
-}
-
-export function getSystemPrompt(request: GenerateTurnRequest): string {
-  const sections = [SYSTEM_PROMPT];
-  const context = buildSystemContext(request);
-
-  if (context) {
-    sections.push(context);
-  }
-
-  return sections.join("\n\n");
-}
-
 function buildMessages(
   request: GenerateTurnRequest,
 ): ModelConversationMessage[] {
@@ -606,16 +503,13 @@ export function renderGenerationPrompt(
       lastMessage.content === request.partialOutput
     ) {
       const withoutLast = messages.slice(0, -1);
-      const base = processor.apply_chat_template(
-        toGemmaMessages(withoutLast),
-        {
-          tools,
-          add_generation_prompt: true,
-          tokenize: false,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          enable_thinking: false,
-        } as any,
-      ) as string;
+      const base = processor.apply_chat_template(toGemmaMessages(withoutLast), {
+        tools,
+        add_generation_prompt: true,
+        tokenize: false,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        enable_thinking: false,
+      } as any) as string;
       return base + request.partialOutput;
     }
   }
@@ -627,235 +521,6 @@ export function renderGenerationPrompt(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     enable_thinking: false,
   } as any) as string;
-}
-
-function parseGemmaToolCallArgs(
-  argsStr: string,
-): Record<string, unknown> | null {
-  // Gemma 4 tool call args format: {key:<|"|>value<|"|>,key2:123}
-  // The <|"|> tokens are decoded as literal strings by the tokenizer.
-  // We parse the brace-enclosed key-value pairs.
-  const result: Record<string, unknown> = {};
-
-  // Strip outer braces
-  const inner = argsStr.trim().replace(/^\{|\}$/g, "").trim();
-  if (!inner) {
-    return result;
-  }
-
-  // Tokenize by splitting on commas that are not inside string tokens
-  // Strings are wrapped with <|"|>...<|"|>
-  const STRING_TOKEN = '<|"|>';
-  let i = 0;
-  const pairs: string[] = [];
-  let currentPair = "";
-
-  while (i < inner.length) {
-    // Check for string token start
-    if (inner.startsWith(STRING_TOKEN, i)) {
-      const start = i + STRING_TOKEN.length;
-      const end = inner.indexOf(STRING_TOKEN, start);
-      if (end === -1) {
-        return null; // malformed
-      }
-      currentPair += inner.slice(i, end + STRING_TOKEN.length);
-      i = end + STRING_TOKEN.length;
-    } else if (inner[i] === ",") {
-      pairs.push(currentPair.trim());
-      currentPair = "";
-      i++;
-    } else {
-      currentPair += inner[i];
-      i++;
-    }
-  }
-  if (currentPair.trim()) {
-    pairs.push(currentPair.trim());
-  }
-
-  for (const pair of pairs) {
-    const colonIdx = pair.indexOf(":");
-    if (colonIdx === -1) continue;
-    const key = pair.slice(0, colonIdx).trim();
-    const rawVal = pair.slice(colonIdx + 1).trim();
-
-    if (rawVal.startsWith(STRING_TOKEN) && rawVal.endsWith(STRING_TOKEN)) {
-      result[key] = rawVal.slice(STRING_TOKEN.length, -STRING_TOKEN.length);
-    } else if (rawVal === "true") {
-      result[key] = true;
-    } else if (rawVal === "false") {
-      result[key] = false;
-    } else if (rawVal === "null") {
-      result[key] = null;
-    } else {
-      const num = Number(rawVal);
-      result[key] = isNaN(num) ? rawVal : num;
-    }
-  }
-
-  return result;
-}
-
-function parseGemmaToolCallPayload(
-  funcName: string,
-  argsStr: string,
-): ModelToolCall | AgentDecision {
-  const args = parseGemmaToolCallArgs(argsStr);
-
-  if (!args) {
-    return {
-      type: "error",
-      message: "Function call arguments could not be parsed.",
-      raw: `<|tool_call>call:${funcName}{${argsStr}}<tool_call|>`,
-    };
-  }
-
-  if (!VALID_TOOLS.includes(funcName as AgentToolName)) {
-    return {
-      type: "error",
-      message: `Unknown function call: ${funcName}.`,
-      raw: `<|tool_call>call:${funcName}{${argsStr}}<tool_call|>`,
-    };
-  }
-
-  return {
-    name: funcName as AgentToolName,
-    arguments: args,
-  };
-}
-
-export function normalizeDecision(
-  raw: string,
-  allowBareContinuation = false,
-): AgentDecision {
-  debugLog("decide:raw-output", {
-    preview: previewText(raw),
-  });
-
-  // Strip trailing special tokens that appear with skip_special_tokens: false
-  const trimmed = raw
-    .replace(/<\|tool_response>$/g, "")
-    .replace(/<turn\|>$/g, "")
-    .replace(/<end_of_turn>$/g, "")
-    .replace(/<eos>$/g, "")
-    .trim();
-
-  // Match complete Gemma 4 tool call: <|tool_call>call:func_name{args}<tool_call|>
-  const completeToolCallMatch = trimmed.match(
-    /^<\|tool_call>call:([A-Za-z_][A-Za-z0-9_]*)\{([\s\S]*?)\}<tool_call\|>$/,
-  );
-
-  if (completeToolCallMatch) {
-    const funcName = completeToolCallMatch[1] ?? "";
-    const argsStr = completeToolCallMatch[2] ?? "";
-    const payload = parseGemmaToolCallPayload(funcName, argsStr);
-
-    if ("type" in payload) {
-      return {
-        ...payload,
-        raw,
-      };
-    }
-
-    debugLog("decide:tool-parsed", { tool: payload.name });
-    switch (payload.name) {
-      case "list_dir":
-        return {
-          type: "tool",
-          tool: "list_dir",
-          args: payload.arguments,
-          raw,
-        };
-      case "read_file": {
-        const readPath = payload.arguments.path;
-        if (typeof readPath !== "string") {
-          return {
-            type: "error",
-            message: "Function call arguments must be a JSON object.",
-            raw,
-          };
-        }
-        return {
-          type: "tool",
-          tool: "read_file",
-          args: { path: readPath },
-          raw,
-        };
-      }
-      case "search_text": {
-        const searchQuery = payload.arguments.query;
-        if (typeof searchQuery !== "string") {
-          return {
-            type: "error",
-            message: "Function call arguments must be a JSON object.",
-            raw,
-          };
-        }
-        return {
-          type: "tool",
-          tool: "search_text",
-          args: { query: searchQuery },
-          raw,
-        };
-      }
-      case "write_file": {
-        const writePath = payload.arguments.path;
-        const writeContent = payload.arguments.content;
-        if (typeof writePath !== "string" || typeof writeContent !== "string") {
-          return {
-            type: "error",
-            message: "Function call arguments must be a JSON object.",
-            raw,
-          };
-        }
-        return {
-          type: "tool",
-          tool: "write_file",
-          args: { path: writePath, content: writeContent },
-          raw,
-        };
-      }
-    }
-  }
-
-  // Incomplete tool call — opening token present but no closing token yet
-  if (trimmed.startsWith("<|tool_call>")) {
-    if (trimmed.includes("<tool_call|>")) {
-      return {
-        type: "error",
-        message: "Function call arguments could not be parsed.",
-        raw,
-      };
-    }
-
-    return {
-      type: "incomplete",
-      partial: trimmed,
-      raw,
-    };
-  }
-
-  if (allowBareContinuation && trimmed) {
-    return {
-      type: "final",
-      message: trimmed,
-      raw,
-    };
-  }
-
-  if (!trimmed) {
-    return {
-      type: "incomplete",
-      partial: trimmed,
-      raw,
-    };
-  }
-
-  return {
-    type: "final",
-    message: trimmed,
-    raw,
-  };
 }
 
 async function generateText(
@@ -935,7 +600,10 @@ async function generateText(
           ).sequences;
     const decoded =
       processor.tokenizer!.batch_decode(
-        sequences.slice(null, [promptLength, sequences.dims[sequences.dims.length - 1]!]),
+        sequences.slice(null, [
+          promptLength,
+          sequences.dims[sequences.dims.length - 1]!,
+        ]),
         {
           skip_special_tokens: false,
         },

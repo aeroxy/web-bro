@@ -39,6 +39,9 @@ export function ThreadSidebar() {
   const modelCache = useAppStore((state) => state.modelCache);
   const workspace = useAppStore((state) => state.workspace);
   const modelStatus = useAppStore((state) => state.modelStatus);
+  const agentBackend = useAppStore((state) => state.agentBackend);
+  const setAgentBackend = useAppStore((state) => state.setAgentBackend);
+  const capabilities = useAppStore((state) => state.capabilities);
   const modelProgress =
     modelStatus.phase === "loading" && typeof modelStatus.progress === "number"
       ? Math.round(Math.max(0, Math.min(100, modelStatus.progress)))
@@ -110,6 +113,45 @@ export function ThreadSidebar() {
             <span className="pill shrink-0">{modelStatus.phase}</span>
           </div>
 
+          <div className="mt-3 grid grid-cols-2 gap-1 rounded-full border border-white/8 bg-black/30 p-1">
+            <button
+              aria-pressed={agentBackend === "chrome-ai"}
+              className={`rounded-full px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                agentBackend === "chrome-ai"
+                  ? "bg-accent-500/20 text-accent-300"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+              disabled={!capabilities.hasChromeAI}
+              onClick={() => void setAgentBackend("chrome-ai")}
+              title={
+                capabilities.hasChromeAI
+                  ? "Use Chrome's built-in Gemini Nano"
+                  : "Chrome Prompt API not available in this browser"
+              }
+              type="button"
+            >
+              Chrome AI
+            </button>
+            <button
+              aria-pressed={agentBackend === "gemma"}
+              className={`rounded-full px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                agentBackend === "gemma"
+                  ? "bg-accent-500/20 text-accent-300"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+              disabled={!capabilities.hasWebGPU}
+              onClick={() => void setAgentBackend("gemma")}
+              title={
+                capabilities.hasWebGPU
+                  ? "Run Gemma 4 in this tab via WebGPU"
+                  : "WebGPU is not available in this browser"
+              }
+              type="button"
+            >
+              Local Gemma
+            </button>
+          </div>
+
           {modelStatus.phase === "loading" ? (
             <div className="mt-4">
               <div className="h-2 overflow-hidden rounded-full bg-white/8">
@@ -132,62 +174,65 @@ export function ThreadSidebar() {
           ) : null}
 
           <p className="mt-4 text-xs leading-6 text-slate-500">
-            Gemma 4 E2B-it ONNX on WebGPU. Cache source:{" "}
-            {modelCache.source ?? "pending"}.
+            {agentBackend === "chrome-ai"
+              ? "Gemini Nano via Chrome's built-in Prompt API. Weights are managed by Chrome."
+              : `Gemma 4 E2B-it ONNX on WebGPU. Cache source: ${modelCache.source ?? "pending"}.`}
           </p>
 
-          <div className="mt-4 rounded-[20px] border border-white/8 bg-black/30 px-3 py-3">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-300">
-                  Cache folder
-                </p>
-                <p className="mt-1 text-sm text-slate-500">
-                  {modelCache.folderName ?? "Not Selected"}
-                </p>
+          {agentBackend === "gemma" ? (
+            <div className="mt-4 rounded-[20px] border border-white/8 bg-black/30 px-3 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-300">
+                    Cache folder
+                  </p>
+                  <p className="mt-1 text-sm text-slate-500">
+                    {modelCache.folderName ?? "Not Selected"}
+                  </p>
+                </div>
+                <span className="pill">
+                  {modelCache.reconnectRequired
+                    ? "Reconnect"
+                    : modelCache.manifestComplete
+                      ? "Ready"
+                      : modelCache.configured
+                        ? "Priming"
+                        : "Optional"}
+                </span>
               </div>
-              <span className="pill">
-                {modelCache.reconnectRequired
-                  ? "Reconnect"
-                  : modelCache.manifestComplete
-                    ? "Ready"
-                    : modelCache.configured
-                      ? "Priming"
-                      : "Optional"}
-              </span>
-            </div>
 
-            <p className="mt-3 text-xs leading-6 text-slate-500">
-              {modelCache.detail}
-            </p>
+              <p className="mt-3 text-xs leading-6 text-slate-500">
+                {modelCache.detail}
+              </p>
 
-            <div className="mt-3 flex gap-2">
-              <button
-                className="ghost-button flex-1"
-                onClick={() =>
-                  modelCache.reconnectRequired
-                    ? void reconnectModelCacheFolder()
-                    : void connectModelCacheFolder()
-                }
-                type="button"
-              >
-                {modelCache.reconnectRequired
-                  ? "Reconnect cache"
-                  : modelCache.configured
-                    ? "Change folder"
-                    : "Select folder"}
-              </button>
-              {modelCache.configured ? (
+              <div className="mt-3 flex gap-2">
                 <button
-                  className="ghost-button"
-                  onClick={() => void clearModelCacheFolder()}
+                  className="ghost-button flex-1"
+                  onClick={() =>
+                    modelCache.reconnectRequired
+                      ? void reconnectModelCacheFolder()
+                      : void connectModelCacheFolder()
+                  }
                   type="button"
                 >
-                  Clear
+                  {modelCache.reconnectRequired
+                    ? "Reconnect cache"
+                    : modelCache.configured
+                      ? "Change folder"
+                      : "Select folder"}
                 </button>
-              ) : null}
+                {modelCache.configured ? (
+                  <button
+                    className="ghost-button"
+                    onClick={() => void clearModelCacheFolder()}
+                    type="button"
+                  >
+                    Clear
+                  </button>
+                ) : null}
+              </div>
             </div>
-          </div>
+          ) : null}
         </div>
       </div>
 
