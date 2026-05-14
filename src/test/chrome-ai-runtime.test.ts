@@ -484,6 +484,35 @@ describe("createChromeAIBackend", () => {
     expect(create).toHaveBeenCalledTimes(2);
   });
 
+  it("releases the stream reader lock even when the consumer callback throws", async () => {
+    const stream = streamFromChunks([
+      JSON.stringify({ kind: "final", message: "ok" }),
+    ]);
+    const session: MockSession = {
+      destroy: vi.fn(),
+      prompt: vi.fn(),
+      promptStreaming: vi.fn(() => stream),
+    };
+    (
+      globalThis as unknown as { LanguageModel: MockLanguageModel }
+    ).LanguageModel = {
+      availability: vi.fn(async () => "available"),
+      create: vi.fn(async () => session),
+    } satisfies MockLanguageModel;
+
+    const backend = createChromeAIBackend();
+    await expect(
+      backend.generateTurn(baseRequest, () => {
+        throw new Error("consumer blew up");
+      }),
+    ).rejects.toThrow("consumer blew up");
+
+    // If the reader lock leaked we couldn't reacquire it. getReader() throws
+    // TypeError "ReadableStream is locked" when called on a still-locked
+    // stream, so a successful second call proves the finally{} released it.
+    expect(() => stream.getReader()).not.toThrow();
+  });
+
   it("destroy aborts in-flight work, destroys the session, and resets status", async () => {
     const sessionDestroy = vi.fn();
     let captured: AbortSignal | undefined;

@@ -1243,4 +1243,18 @@ describe("app store", () => {
       raw: '<|tool_call>call:unknown_tool{path:<|"|>a.txt<|"|>}<tool_call|>',
     });
   });
+
+  it("treats an empty bare value as an empty string, not the number 0", () => {
+    // Number("") is 0. Without the empty-string guard, {path:} parses as
+    // { path: 0 } — passing a number where the dispatcher (and the workspace
+    // layer) expect a string. Keep it as "" so the type stays correct.
+    const decision = normalizeDecision(
+      "<|tool_call>call:read_file{path:}<tool_call|>",
+    );
+    expect(decision.type).toBe("tool");
+    if (decision.type === "tool" && decision.tool === "read_file") {
+      expect(decision.args.path).toBe("");
+      expect(typeof decision.args.path).toBe("string");
+    }
+  });
 });
